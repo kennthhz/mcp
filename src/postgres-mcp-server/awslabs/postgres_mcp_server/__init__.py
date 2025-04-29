@@ -12,7 +12,14 @@
 """awslabs.postgres-mcp-server"""
 
 <<<<<<< HEAD
+<<<<<<< HEAD
 __version__ = '0.0.4'
 =======
 __version__ = '0.1.0'
 >>>>>>> add5c2e (create the v1 of postgres-mcp-server which supports NL2SQL)
+=======
+__version__ = '0.1.0'
+=======
+__version__ = '0.0.4'
+>>>>>>> 4fd4486 (create the v1 of postgres-mcp-server which supports NL2SQL)
+>>>>>>> b900808 (create the v1 of postgres-mcp-server which supports NL2SQL)
