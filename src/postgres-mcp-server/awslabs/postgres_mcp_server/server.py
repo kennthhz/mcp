@@ -24,6 +24,39 @@ from mcp.server.fastmcp import FastMCP
 
 db_connection = None
 
+class DBClusterUpdateRequest(BaseModel):
+    cluster_id: str = Field(
+        alias="DBClusterIdentifier",
+        description="DB Cluster Identifier")
+    min_capacity: Optional[float] = Field(
+        default=None,
+        description="Minimum serverless V2 scaling capacity"
+    )
+    max_capacity: Optional[float] = Field(
+        default=None,
+        description="Maximum serverless V2 scaling capacity"
+    )
+    enable_iam: Optional[bool] = Field(
+        default=None,
+        alias="EnableIAMDatabaseAuthentication",
+        description="Enable or disable IAM Authentication"
+    )
+    backup_retention_period: Optional[int] = Field(
+        default=None,
+        alias="BackupRetentionPeriod",
+        description="Backup retention period in days"
+    )
+    deletion_protection: Optional[bool] = Field(
+        default=None,
+        alias="DeletionProtection",
+        description="Enable or disable delettion protection"
+    )
+    auto_minor_version_upgrade: Optional[bool] = Field(
+        default=None,
+        alias="AutoMinorVersionUpgrade",
+        description="Specifies whether minor engine upgrades are applied automatically to the DB cluster during the maintenance window"
+    )
+
 class DBConnection:
     def __init__(self, cluster_arn, secret_arn, database, region):
         self.cluster_arn = cluster_arn
@@ -63,6 +96,53 @@ class DBConnection:
             execute_params['parameters'] = parameters
         
         return self.data_client.execute_statement(**execute_params)
+    
+    async def create_serverless_v2_cluster_instance(self, cluster_name: str):
+        self.rds_client.create_db_cluster(
+            DBClusterIdentifier=cluster_name,
+            Engine="aurora-postgresql",
+            DatabaseName="postgres",
+            ServerlessV2ScalingConfiguration={
+                'MinCapacity': 0.5 ,
+                'MaxCapacity': 25
+            },
+            MasterUsername = "postgres",
+            ManageMasterUserPassword=True,
+            DeletionProtection=False,
+            EnableHttpEndpoint=True
+        )
+        
+        self.rds_client.create_db_instance(
+            DBInstanceIdentifier=cluster_name + '-instance',
+            DBClusterIdentifier=cluster_name,
+            Engine='aurora-postgresql',
+            DBInstanceClass='db.serverless',
+    )
+        
+    async def describe_db_cluster(self, cluster_name: str) -> Any:
+        return self.rds_client.describe_db_clusters(DBClusterIdentifier=cluster_name)
+    
+    async def modify_db_cluster(self, req : DBClusterUpdateRequest) -> Any:
+        # Start with the required field
+        update_params = req.dict(
+            exclude_unset=True,
+            by_alias=True,
+            exclude={"min_capacity", "max_capacity"}  # We'll handle these manually
+        )
+
+        # Conditionally add ServerlessV2ScalingConfiguration if either value is set
+        if req.min_capacity is not None or req.max_capacity is not None:
+            update_params["ServerlessV2ScalingConfiguration"] = {}
+            if req.min_capacity is not None:
+                update_params["ServerlessV2ScalingConfiguration"]["MinCapacity"] = req.min_capacity
+            if req.max_capacity is not None:
+                update_params["ServerlessV2ScalingConfiguration"]["MaxCapacity"] = req.max_capacity
+
+        # Always apply immediately unless you want to defer
+        update_params["ApplyImmediately"] = True
+
+        logger.info("Final update payload:", update_params)
+        return self.rds_client.modify_db_cluster(**update_params)
 
 def parse_records(records) -> List[Dict[str, str]]:
     """
@@ -97,12 +177,60 @@ async def run_query(sql : str) -> Any:
         logger.success("Successfully execute query:{}", sql)
         return parse_records(response.get('records', []))
     except ClientError as e:
-        logger.error(f"AWS ClientError: {e.response['Error']['Message']}")
-        return {"error": f"AWS error: {e.response['Error']['Message']}"}
-
+        logger.error(f"run_query error: {e.response['Error']['Message']}")
+        return {"error": f"run_query error: {e.response['Error']['Message']}"}
     except Exception as e:
-        logger.exception("Unexpected error during query execution")
-        return {"error": f"Unexpected error: {str(e)}"}
+        logger.exception("Unexpected error during run_query")
+        return {"error": f"run_query unexpected error: {str(e)}"}
+    
+@mcp.tool(
+    name = 'describe_db_cluster',
+    description = 'describe or get information of a db cluster'
+)
+async def describe_db_cluster(cluster_name: str) -> Any:
+    global db_connection
+    try:
+        logger.info(f"describe_db_cluster: {cluster_name}")
+        return await db_connection.describe_db_cluster(cluster_name)
+    except ClientError as e:
+        logger.error(f"describe_db_cluster error: {e.response['Error']['Message']}")
+        return {"error": f"describe_db_cluster error: {e.response['Error']['Message']}"}
+    except Exception as e:
+        logger.exception("Unexpected error during describe_db_cluster")
+        return {"error": f"describe_db_cluster unexpected error: {str(e)}"}
+
+@mcp.tool(
+    name = 'modify_db_cluster',
+    description = 'Modify or update a db cluster'
+)
+async def modify_db_cluster(req : DBClusterUpdateRequest) -> Any:
+    global db_connection
+    try:
+        logger.info(f"modify_db_cluster: {req.cluster_id}")
+        return await db_connection.modify_db_cluster(req)
+    except ClientError as e:
+        logger.error(f"modify_db_cluster error: {e.response['Error']['Message']}")
+        return {"error": f"modify_db_cluster error: {e.response['Error']['Message']}"}
+    except Exception as e:
+        logger.exception("Unexpected error during modify_db_cluster")
+        return {"error": f"modify_db_cluster unexpected error: {str(e)}"}
+
+@mcp.tool(
+    name = 'create_serverless_aurora_postgreSQL_cluster',
+    description = 'create a serverless Aurora PostgreSQL cluster'
+)
+async def create_serverless_aurora_postgreSQL_cluster(cluster_name : str) -> Any:
+    global db_connection
+    try:
+        logger.info(f"create_serverless_aurora_postgreSQL_cluster: {cluster_name}")
+        return await db_connection.create_serverless_v2_cluster_instance(cluster_name)
+        logger.success("Successfully created serverless V2 cluster {} and instance", cluster_name)
+    except ClientError as e:
+        logger.error(f"create_serverless_aurora_postgreSQL_cluster error: {e.response['Error']['Message']}")
+        return {"error": f"create_serverless_aurora_postgreSQL_cluster error: {e.response['Error']['Message']}"}
+    except Exception as e:
+        logger.exception("Unexpected error during create_serverless_aurora_postgreSQL_cluster")
+        return {"error": f"create_serverless_aurora_postgreSQL_cluster unexpected error: {str(e)}"}
 
 def init_db_connection(resource_arn, secret_arn, database, region):
     db_connection = DBConnection(resource_arn, secret_arn, database, region)
