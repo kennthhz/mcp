@@ -122,7 +122,7 @@ async def get_table_schema(table_name: Annotated[str, Field(description="name of
     try:
         logger.info(f"get_table_schema: {table_name}")
 
-        sql = """
+        sql = f"""
             SELECT 
                 a.attname AS column_name,
                 pg_catalog.format_type(a.atttypid, a.atttypmod) AS data_type,
@@ -130,32 +130,15 @@ async def get_table_schema(table_name: Annotated[str, Field(description="name of
             FROM 
                 pg_attribute a
             WHERE 
-                a.attrelid = %s::regclass
+                a.attrelid = '{table_name}'::regclass
                 AND a.attnum > 0
                 AND NOT a.attisdropped
             ORDER BY a.attnum
         """
 
-        parameters = [ {
-                "name": "table",  # name is ignored, position matters
-                "value": {"stringValue": table_name}
-            }
-        ]
-
-        response = await run_query.run_sql(sql, parameters)
+        response = await run_query(sql)
         logger.success("Successfully get_table_schema:{}", table_name)
-
-        columns = response.get("records", [])
-        tool_response = [
-            {
-                "column_name": col[0]["stringValue"],
-                "data_type": col[1]["stringValue"],
-                "comment": col[2].get("stringValue") if len(col) > 2 and "stringValue" in col[2] else None
-            }
-            for col in columns
-        ]
-
-        return tool_response
+        return response
     except ClientError as e:
         logger.error(f"get_table_schema error: {e.response['Error']['Message']}")
         return [{"get_table_schema ClientError": f"{type(e).__name__}: {str(e)}"}]
@@ -181,7 +164,7 @@ def main():
         DBConnectionSingleton.initialize(args.resource_arn, args.secret_arn, args.database, args.region)
         asyncio.run(run_query('SELECT 1'))
     except Exception as e:
-        logger.exception("Failed to create and validate db connection to Postgres. Exit the MCP server")
+        logger.error(f"Failed to create and validate db connection to Postgres. Exit the MCP server. error: {e.response['Error']['Message']}")
         sys.exit(1)
 
     logger.success("Successfully validated connection to Postgres")
