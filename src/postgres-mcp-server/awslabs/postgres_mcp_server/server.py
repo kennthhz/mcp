@@ -12,50 +12,14 @@
 """awslabs postgres MCP Server implementation."""
 
 import argparse
-import asyncio
 import sys
+import asyncio
 from loguru import logger
-from typing import Optional, TypedDict, List, Dict, Literal, Any
+from typing import Optional, List, Dict, Annotated, Any
 import boto3
 from botocore.exceptions import ClientError
-from pydantic import BaseModel, Field
-import mcp.types as types
+from pydantic import Field
 from mcp.server.fastmcp import FastMCP
-
-db_connection = None
-
-class DBClusterUpdateRequest(BaseModel):
-    cluster_id: str = Field(
-        alias="DBClusterIdentifier",
-        description="DB Cluster Identifier")
-    min_capacity: Optional[float] = Field(
-        default=None,
-        description="Minimum serverless V2 scaling capacity"
-    )
-    max_capacity: Optional[float] = Field(
-        default=None,
-        description="Maximum serverless V2 scaling capacity"
-    )
-    enable_iam: Optional[bool] = Field(
-        default=None,
-        alias="EnableIAMDatabaseAuthentication",
-        description="Enable or disable IAM Authentication"
-    )
-    backup_retention_period: Optional[int] = Field(
-        default=None,
-        alias="BackupRetentionPeriod",
-        description="Backup retention period in days"
-    )
-    deletion_protection: Optional[bool] = Field(
-        default=None,
-        alias="DeletionProtection",
-        description="Enable or disable delettion protection"
-    )
-    auto_minor_version_upgrade: Optional[bool] = Field(
-        default=None,
-        alias="AutoMinorVersionUpgrade",
-        description="Specifies whether minor engine upgrades are applied automatically to the DB cluster during the maintenance window"
-    )
 
 class DBConnection:
     def __init__(self, cluster_arn, secret_arn, database, region):
@@ -63,100 +27,51 @@ class DBConnection:
         self.secret_arn = secret_arn
         self.database = database
         self.data_client = boto3.client('rds-data', region_name = region)
-        self.rds_client = boto3.client('rds', region_name = region)
 
-    async def test_connection(self):
-        await self.run_sql('SELECT 1')
+class DBConnectionSingleton:
+    _instance = None
 
-    async def run_sql (
-        self,
-        sql: str,
-        parameters: Optional[List[Dict[str, Any]]] = None
-    ) -> []: # type: ignore
-        """
-        Execute a SQL statement using the RDS Data API
-        
-        Args:
-            sql: SQL query to execute
-            parameters: List of parameters for the query
-            
-        Returns:
-            List of dictionaries containing the query results
-        """
+    def __init__(self, resource_arn, secret_arn, database, region):
+        if not all([resource_arn, secret_arn, database, region]):
+            raise ValueError("All connection parameters must be provided for initial initialization")
+        self._db_connection = DBConnection(resource_arn, secret_arn, database, region)
 
-        execute_params = {
-            'resourceArn': self.cluster_arn,
-            'secretArn': self.secret_arn,
-            'database': self.database,
-            'sql': sql,
-            'includeResultMetadata':True
-        }
+    @classmethod
+    def initialize(cls, resource_arn, secret_arn, database, region):
+        if cls._instance is None:
+            cls._instance = cls(resource_arn, secret_arn, database, region)
 
-        if parameters:
-            execute_params['parameters'] = parameters
-        
-        return self.data_client.execute_statement(**execute_params)
+    @classmethod
+    def get(cls):
+        if cls._instance is None:
+            raise RuntimeError("DBConnectionSingleton is not initialized.")
+        return cls._instance
     
-    async def create_serverless_v2_cluster_instance(self, cluster_name: str):
-        self.rds_client.create_db_cluster(
-            DBClusterIdentifier=cluster_name,
-            Engine="aurora-postgresql",
-            DatabaseName="postgres",
-            ServerlessV2ScalingConfiguration={
-                'MinCapacity': 0.5 ,
-                'MaxCapacity': 25
-            },
-            MasterUsername = "postgres",
-            ManageMasterUserPassword=True,
-            DeletionProtection=False,
-            EnableHttpEndpoint=True
-        )
-        
-        self.rds_client.create_db_instance(
-            DBInstanceIdentifier=cluster_name + '-instance',
-            DBClusterIdentifier=cluster_name,
-            Engine='aurora-postgresql',
-            DBInstanceClass='db.serverless',
-    )
-        
-    async def describe_db_cluster(self, cluster_name: str) -> Any:
-        return self.rds_client.describe_db_clusters(DBClusterIdentifier=cluster_name)
-    
-    async def modify_db_cluster(self, req : DBClusterUpdateRequest) -> Any:
-        # Start with the required field
-        update_params = req.dict(
-            exclude_unset=True,
-            by_alias=True,
-            exclude={"min_capacity", "max_capacity"}  # We'll handle these manually
-        )
+    @property
+    def db_connection(self):
+        return self._db_connection
 
-        # Conditionally add ServerlessV2ScalingConfiguration if either value is set
-        if req.min_capacity is not None or req.max_capacity is not None:
-            update_params["ServerlessV2ScalingConfiguration"] = {}
-            if req.min_capacity is not None:
-                update_params["ServerlessV2ScalingConfiguration"]["MinCapacity"] = req.min_capacity
-            if req.max_capacity is not None:
-                update_params["ServerlessV2ScalingConfiguration"]["MaxCapacity"] = req.max_capacity
+def extract_cell(cell: dict):
+    """Extracts the scalar or array value from a single cell"""
+    if cell.get("isNull"):
+        return None
+    for key in (
+        "stringValue", "longValue", "doubleValue", "booleanValue", "blobValue", "arrayValue"
+    ):
+        if key in cell:
+            return cell[key]
+    return None
 
-        # Always apply immediately unless you want to defer
-        update_params["ApplyImmediately"] = True
+def parse_execute_response(response: dict) -> list[dict]:
+    """Convert RDS Data API execute_statement response to list of rows"""
+    columns = [col["name"] for col in response.get("columnMetadata", [])]
+    records = []
 
-        logger.info("Final update payload:", update_params)
-        return self.rds_client.modify_db_cluster(**update_params)
+    for row in response.get("records", []):
+        row_data = {col: extract_cell(cell) for col, cell in zip(columns, row)}
+        records.append(row_data)
 
-def parse_records(records) -> List[Dict[str, str]]:
-    """
-    Convert RDS Data API records into list of dicts.
-    Each row is converted into a dictionary keyed by column name.
-    """
-    result = []
-    for row in records:
-        parsed_row = {}
-        for field in row:
-            for key, value in field.items():
-                parsed_row[key] = value
-        result.append(parsed_row)
-    return result
+    return records
 
 mcp = FastMCP(
     'apg-mcp MCP server. This is the starting point for all solutions created',
@@ -167,79 +82,88 @@ mcp = FastMCP(
 
 @mcp.tool(
     name = "run_query",
-    description = 'Run a SQL query'
+    description = 'Run a SQL query using boto3 execute_statement'
 )
-async def run_query(sql : str) -> Any:
-    global db_connection
+async def run_query(
+    sql : Annotated[str, Field(description="The SQL query to run")], 
+    query_parameters: Annotated[Optional[List[Dict[str, Any]]], Field(description="Parameters for the SQL query")] = None) -> list[dict]:
     try:
-        logger.info(f"Executing SQL: {sql}")
-        response = await db_connection.run_sql(sql)
-        logger.success("Successfully execute query:{}", sql)
-        return parse_records(response.get('records', []))
+        logger.info(f"run_query: {sql}")
+
+        db_connection = DBConnectionSingleton.get().db_connection
+
+        execute_params = {
+            'resourceArn': db_connection.cluster_arn,
+            'secretArn': db_connection.secret_arn,
+            'database': db_connection.database,
+            'sql': sql,
+            'includeResultMetadata':True
+        }
+
+        if query_parameters:
+            execute_params['parameters'] = query_parameters
+        
+        response = await asyncio.to_thread(db_connection.data_client.execute_statement, **execute_params)
+        
+        logger.success("run_query successfully executed query:{}", sql)
+        return parse_execute_response(response)
     except ClientError as e:
-        logger.error(f"run_query error: {e.response['Error']['Message']}")
-        return {"error": f"run_query error: {e.response['Error']['Message']}"}
+        logger.error(f"run_query ClientError: {e.response['Error']['Message']}")
+        return [{"run_query ClientError": f"{type(e).__name__}: {str(e)}"}]
     except Exception as e:
-        logger.exception("Unexpected error during run_query")
-        return {"error": f"run_query unexpected error: {str(e)}"}
-    
-@mcp.tool(
-    name = 'describe_db_cluster',
-    description = 'describe or get information of a db cluster'
-)
-async def describe_db_cluster(cluster_name: str) -> Any:
-    global db_connection
-    try:
-        logger.info(f"describe_db_cluster: {cluster_name}")
-        return await db_connection.describe_db_cluster(cluster_name)
-    except ClientError as e:
-        logger.error(f"describe_db_cluster error: {e.response['Error']['Message']}")
-        return {"error": f"describe_db_cluster error: {e.response['Error']['Message']}"}
-    except Exception as e:
-        logger.exception("Unexpected error during describe_db_cluster")
-        return {"error": f"describe_db_cluster unexpected error: {str(e)}"}
+        logger.error(f"run_query unexpected error: {e.response['Error']['Message']}")
+        return [{"run_query unexpected error": f"{type(e).__name__}: {str(e)}"}]
 
 @mcp.tool(
-    name = 'modify_db_cluster',
-    description = 'Modify or update a db cluster'
+    name="get_table_schema",
+    description="Fetch table columns and comments from Postgres using RDS Data API"
 )
-async def modify_db_cluster(req : DBClusterUpdateRequest) -> Any:
-    global db_connection
+async def get_table_schema(table_name: Annotated[str, Field(description="name of the table")]) -> list[dict]:
     try:
-        logger.info(f"modify_db_cluster: {req.cluster_id}")
-        return await db_connection.modify_db_cluster(req)
-    except ClientError as e:
-        logger.error(f"modify_db_cluster error: {e.response['Error']['Message']}")
-        return {"error": f"modify_db_cluster error: {e.response['Error']['Message']}"}
-    except Exception as e:
-        logger.exception("Unexpected error during modify_db_cluster")
-        return {"error": f"modify_db_cluster unexpected error: {str(e)}"}
+        logger.info(f"get_table_schema: {table_name}")
 
-@mcp.tool(
-    name = 'create_serverless_aurora_postgreSQL_cluster',
-    description = 'create a serverless Aurora PostgreSQL cluster'
-)
-async def create_serverless_aurora_postgreSQL_cluster(cluster_name : str) -> Any:
-    global db_connection
-    try:
-        logger.info(f"create_serverless_aurora_postgreSQL_cluster: {cluster_name}")
-        return await db_connection.create_serverless_v2_cluster_instance(cluster_name)
-        logger.success("Successfully created serverless V2 cluster {} and instance", cluster_name)
-    except ClientError as e:
-        logger.error(f"create_serverless_aurora_postgreSQL_cluster error: {e.response['Error']['Message']}")
-        return {"error": f"create_serverless_aurora_postgreSQL_cluster error: {e.response['Error']['Message']}"}
-    except Exception as e:
-        logger.exception("Unexpected error during create_serverless_aurora_postgreSQL_cluster")
-        return {"error": f"create_serverless_aurora_postgreSQL_cluster unexpected error: {str(e)}"}
+        sql = """
+            SELECT 
+                a.attname AS column_name,
+                pg_catalog.format_type(a.atttypid, a.atttypmod) AS data_type,
+                col_description(a.attrelid, a.attnum) AS column_comment
+            FROM 
+                pg_attribute a
+            WHERE 
+                a.attrelid = %s::regclass
+                AND a.attnum > 0
+                AND NOT a.attisdropped
+            ORDER BY a.attnum
+        """
 
-def init_db_connection(resource_arn, secret_arn, database, region):
-    db_connection = DBConnection(resource_arn, secret_arn, database, region)
-    asyncio.run(db_connection.test_connection())
-    return db_connection
+        parameters = [ {
+                "name": "table",  # name is ignored, position matters
+                "value": {"stringValue": table_name}
+            }
+        ]
+
+        response = await run_query.run_sql(sql, parameters)
+        logger.success("Successfully get_table_schema:{}", table_name)
+
+        columns = response.get("records", [])
+        tool_response = [
+            {
+                "column_name": col[0]["stringValue"],
+                "data_type": col[1]["stringValue"],
+                "comment": col[2].get("stringValue") if len(col) > 2 and "stringValue" in col[2] else None
+            }
+            for col in columns
+        ]
+
+        return tool_response
+    except ClientError as e:
+        logger.error(f"get_table_schema error: {e.response['Error']['Message']}")
+        return [{"get_table_schema ClientError": f"{type(e).__name__}: {str(e)}"}]
+    except Exception as e:
+        logger.error(f"get_table_schema unexpected error: {e.response['Error']['Message']}")
+        return [{"get_table_schema unexpected": f"{type(e).__name__}: {str(e)}"}]
 
 def main():
-    global db_connection
-
     """Run the MCP server with CLI argument support."""
     parser = argparse.ArgumentParser(description='An AWS Labs Model Context Protocol (MCP) server for postgres')
     parser.add_argument('--sse', action='store_true', help='Use SSE transport')
@@ -248,16 +172,16 @@ def main():
     parser.add_argument('--secret_arn', required=True, help='ARN of the Secrets Manager secret for database credentials')
     parser.add_argument('--database', required=True, help='Database name')
     parser.add_argument('--region', required=True, default='us-west-2', help='AWS region for RDS Data API (default: us-west-2)')
-
     args = parser.parse_args()
 
     logger.info("Postgres MCP init with CLUSTER_ARN:{}, SECRET_ARN:{}, REGION:{}, DATABASE:{}", 
                 args.resource_arn, args.secret_arn, args.region, args.database)
-
+    
     try:
-        db_connection = init_db_connection(args.resource_arn, args.secret_arn, args.database, args.region)
+        DBConnectionSingleton.initialize(args.resource_arn, args.secret_arn, args.database, args.region)
+        asyncio.run(run_query('SELECT 1'))
     except Exception as e:
-        logger.exception("Failed to validate connection to Postgres. Exit the MCP server")
+        logger.exception("Failed to create and validate db connection to Postgres. Exit the MCP server")
         sys.exit(1)
 
     logger.success("Successfully validated connection to Postgres")
