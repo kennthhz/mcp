@@ -15,6 +15,7 @@ Instructions for using this postgres MCP server. This can be used by clients to 
 
 ## Add or update your LLM client's config with following:
 
+<pre><code>```json 
 {
   "mcpServers": {
     "awslabs.postgres-mcp-server": {
@@ -35,6 +36,7 @@ Instructions for using this postgres MCP server. This can be used by clients to 
     }
   }
 }
+```</code></pre>
 
 ## TODO (REMOVE AFTER COMPLETING)
 
