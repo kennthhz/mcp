@@ -15,7 +15,7 @@ Instructions for using this postgres MCP server. This can be used by clients to 
 
 ## Add or update your LLM client's config with following:
 
-<pre><code>```json 
+<pre><code> 
 {
   "mcpServers": {
     "awslabs.postgres-mcp-server": {
@@ -24,19 +24,19 @@ Instructions for using this postgres MCP server. This can be used by clients to 
         "run", 
         "-i", 
         "--rm",
-        "-e", "AWS_ACCESS_KEY_ID=<your data>",
-        "-e", "AWS_SECRET_ACCESS_KEY=<your data>",
-        "-e", "AWS_REGION=<your data>",
+        "-e", "AWS_ACCESS_KEY_ID=[your data]",
+        "-e", "AWS_SECRET_ACCESS_KEY=[your data]",
+        "-e", "AWS_REGION=[your data]",
         "awslabs/postgres-mcp-server:latest", 
-        "--resource_arn", "<your data>",
-        "--secret_arn", "<your data>",
-        "--database", "<your data>",
-	"--region", "<your data>"
+        "--resource_arn", "[your data]",
+        "--secret_arn", "[your data]",
+        "--database", "[your data]",
+	"--region", "[your data]"
       ]
     }
   }
 }
-```</code></pre>
+</code></pre>
 
 ## TODO (REMOVE AFTER COMPLETING)
 
