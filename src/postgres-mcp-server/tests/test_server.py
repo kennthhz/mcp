@@ -51,7 +51,6 @@ def wrap_value(val):
     else:
         raise TypeError(f"Unsupported value type: {type(val)}")
 
-
 def mock_execute_statement_response(
     columns: list[str],
     rows: list[list],
@@ -128,6 +127,91 @@ async def test_run_query_well_formatted_response():
 
     mock_db_connection.data_client.add_mock_response(response)
     tool_response = await run_query(sql_text, mock_db_connection)
+
+    #validate tool_response
+    assert(isinstance(tool_response, (list, tuple)) and len(tool_response) == 1 and isinstance(tool_response[0], dict))
+    column_records = tool_response[0]
+    assert(len(column_records) == len(columns))
+    for col_name in columns:
+        assert(col_name in column_records)
+
+@pytest.mark.asyncio
+async def test_run_query_bad_rds_response():
+    DBConnectionSingleton.initialize('mock', 'mock', 'mock', 'mock', readonly = True, is_test = True)
+
+    mock_db_connection = Mock_DBConnection(True)
+    sql_text=r"""SELECT 1"""
+
+    response = [{"bad":"bad"}]
+    mock_db_connection.data_client.add_mock_response(response)
+    tool_response = await run_query(sql_text, mock_db_connection)
+    assert(is_error_response(tool_response))
+
+@pytest.mark.asyncio
+async def test_run_query_risky_parameters():
+    DBConnectionSingleton.initialize('mock', 'mock', 'mock', 'mock', readonly = True, is_test = True)
+    mock_db_connection = Mock_DBConnection(True)
+
+    sql_text=r"""SELECT 1"""
+    query_parameters = [{'name': 'id', 'value': {'stringValue': "1 OR 1=1"}}]
+    tool_response = await run_query(sql_text, mock_db_connection,query_parameters)
+    assert(is_error_response(tool_response))
+
+@pytest.mark.asyncio
+async def test_run_query_throw_client_error():
+    DBConnectionSingleton.initialize('mock', 'mock', 'mock', 'mock', readonly = True, is_test = True)
+    mock_db_connection = Mock_DBConnection(True, True)
+    sql_text=r"""SELECT 1"""
+    tool_response = await run_query(sql_text, mock_db_connection)
+    assert(is_error_response(tool_response))
+
+@pytest.mark.asyncio
+async def test_run_query_write_prohibited():
+    DBConnectionSingleton.initialize('mock', 'mock', 'mock', 'mock', readonly = True, is_test = True)
+
+    # Set readonly to be true and send write query
+    mock_db_connection = Mock_DBConnection(True)
+
+    sql_text=r"""WITH new_users AS (
+        SELECT * FROM staging_users WHERE is_valid = true
+    )
+    INSERT INTO users (id, name, email)
+    SELECT id, name, email FROM new_users
+    RETURNING id;"""
+
+    tool_response = await run_query(sql_text, mock_db_connection)
+    assert(is_error_response(tool_response))
+
+    # Set readonly to be false and send write query
+    mock_db_connection2 = Mock_DBConnection(False)
+
+    columns = [
+    "text_column", "boolean_column", "integer_column", "float_column", "numeric_column",
+    "uuid_column", "timestamp_column", "date_column", "time_column", "text_array_column", "json_column", "null_column"
+    ]
+
+    row = [
+        "Hello world",                            # TEXT
+        True,                                     # BOOLEAN
+        123,                                      # INTEGER
+        45.67,                                    # FLOAT
+        decimal.Decimal("12345.6789"),            # NUMERIC
+        uuid.uuid4(),                             # UUID
+        datetime.datetime(2023, 1, 1, 12, 0),      # TIMESTAMP
+        datetime.date(2023, 1, 1),                # DATE
+        datetime.time(14, 30),                    # TIME
+        ["one", "two", "three"],                 # TEXT[]
+        {"key": "value", "flag": True},           # JSON
+        None                                      # NULL
+    ]
+
+    response = mock_execute_statement_response(
+        columns=columns,
+        rows=[row]
+    )
+
+    mock_db_connection2.data_client.add_mock_response(response)
+    tool_response = await run_query(sql_text, mock_db_connection2)
 
     #validate tool_response
     assert(isinstance(tool_response, (list, tuple)) and len(tool_response) == 1 and isinstance(tool_response[0], dict))
@@ -229,71 +313,6 @@ def test_detect_non_mutating_keywords():
     
     for sql in allowed_sqls:
         assert(not detect_mutating_keywords(sql))
-
-@pytest.mark.asyncio
-async def test_run_query_write_prohibited():
-    DBConnectionSingleton.initialize('mock', 'mock', 'mock', 'mock', readonly = True, is_test = True)
-
-    # Set readonly to be true and send write query
-    mock_db_connection = Mock_DBConnection(True)
-
-    sql_text=r"""WITH new_users AS (
-        SELECT * FROM staging_users WHERE is_valid = true
-    )
-    INSERT INTO users (id, name, email)
-    SELECT id, name, email FROM new_users
-    RETURNING id;"""
-
-    tool_response = await run_query(sql_text, mock_db_connection)
-    assert(is_error_response(tool_response))
-
-    # Set readonly to be false and send write query
-    mock_db_connection2 = Mock_DBConnection(False)
-
-    columns = [
-    "text_column", "boolean_column", "integer_column", "float_column", "numeric_column",
-    "uuid_column", "timestamp_column", "date_column", "time_column", "text_array_column", "json_column", "null_column"
-    ]
-
-    row = [
-        "Hello world",                            # TEXT
-        True,                                     # BOOLEAN
-        123,                                      # INTEGER
-        45.67,                                    # FLOAT
-        decimal.Decimal("12345.6789"),            # NUMERIC
-        uuid.uuid4(),                             # UUID
-        datetime.datetime(2023, 1, 1, 12, 0),      # TIMESTAMP
-        datetime.date(2023, 1, 1),                # DATE
-        datetime.time(14, 30),                    # TIME
-        ["one", "two", "three"],                 # TEXT[]
-        {"key": "value", "flag": True},           # JSON
-        None                                      # NULL
-    ]
-
-    response = mock_execute_statement_response(
-        columns=columns,
-        rows=[row]
-    )
-
-    mock_db_connection2.data_client.add_mock_response(response)
-    tool_response = await run_query(sql_text, mock_db_connection2)
-
-    #validate tool_response
-    assert(isinstance(tool_response, (list, tuple)) and len(tool_response) == 1 and isinstance(tool_response[0], dict))
-    column_records = tool_response[0]
-    assert(len(column_records) == len(columns))
-    for col_name in columns:
-        assert(col_name in column_records)
-
-@pytest.mark.asyncio
-async def test_run_query_risky_parameters():
-    DBConnectionSingleton.initialize('mock', 'mock', 'mock', 'mock', readonly = True, is_test = True)
-    mock_db_connection = Mock_DBConnection(True)
-
-    sql_text=r"""SELECT 1"""
-    query_parameters = [{'name': 'id', 'value': {'stringValue': "1 OR 1=1"}}]
-    tool_response = await run_query(sql_text, mock_db_connection,query_parameters )
-    assert(is_error_response(tool_response))
 
 def test_detect_mutating_keywords():
     test_sqls = [
@@ -450,3 +469,4 @@ if __name__ == "__main__":
     asyncio.run(test_run_query_well_formatted_response())
     asyncio.run(test_run_query_write_prohibited())
     asyncio.run(test_run_query_risky_parameters())
+    asyncio.run(test_run_query_throw_client_error())
