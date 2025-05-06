@@ -17,7 +17,7 @@ import uuid
 import datetime
 import decimal
 from conftest import Mock_DBConnection
-from awslabs.postgres_mcp_server.server import run_query, DBConnectionSingleton
+from awslabs.postgres_mcp_server.server import run_query, DBConnectionSingleton, write_query_prohibited_key, is_error_response
 from awslabs.postgres_mcp_server.mutable_sql_detector import detect_mutating_keywords
 
 def wrap_value(val):
@@ -136,8 +136,7 @@ async def test_run_query_well_formatted_response():
     for col_name in columns:
         assert(col_name in column_records)
 
-@pytest.mark.asyncio
-def test_run_query_readonly_allowed():
+def test_detect_non_mutating_keywords():
     allowed_sqls = [
         r"""-- Select with join]
         SELECT u.id, u.name, o.order_date, o.total
@@ -153,7 +152,7 @@ def test_run_query_readonly_allowed():
         GROUP BY department_id
         HAVING COUNT(*) > 5;""",
 
-        """-- Subquery in WHERE UPDATE
+        r"""-- Subquery in WHERE UPDATE
         SELECT *
         FROM products
         WHERE price < (
@@ -231,7 +230,175 @@ def test_run_query_readonly_allowed():
     for sql in allowed_sqls:
         assert(not detect_mutating_keywords(sql))
 
+@pytest.mark.asyncio
+async def test_run_query_write_prohibited():
+    DBConnectionSingleton.initialize('mock', 'mock', 'mock', 'mock', readonly = True, is_test = True)
+
+    # Set readonly to be true and send write query
+    mock_db_connection = Mock_DBConnection(True)
+
+    sql_text=r"""WITH new_users AS (
+        SELECT * FROM staging_users WHERE is_valid = true
+    )
+    INSERT INTO users (id, name, email)
+    SELECT id, name, email FROM new_users
+    RETURNING id;"""
+
+    tool_response = await run_query(sql_text, mock_db_connection)
+    assert(is_error_response(tool_response))
+
+    # Set readonly to be false and send write query
+    mock_db_connection2 = Mock_DBConnection(False)
+
+    columns = [
+    "text_column", "boolean_column", "integer_column", "float_column", "numeric_column",
+    "uuid_column", "timestamp_column", "date_column", "time_column", "text_array_column", "json_column", "null_column"
+    ]
+
+    row = [
+        "Hello world",                            # TEXT
+        True,                                     # BOOLEAN
+        123,                                      # INTEGER
+        45.67,                                    # FLOAT
+        decimal.Decimal("12345.6789"),            # NUMERIC
+        uuid.uuid4(),                             # UUID
+        datetime.datetime(2023, 1, 1, 12, 0),      # TIMESTAMP
+        datetime.date(2023, 1, 1),                # DATE
+        datetime.time(14, 30),                    # TIME
+        ["one", "two", "three"],                 # TEXT[]
+        {"key": "value", "flag": True},           # JSON
+        None                                      # NULL
+    ]
+
+    response = mock_execute_statement_response(
+        columns=columns,
+        rows=[row]
+    )
+
+    mock_db_connection2.data_client.add_mock_response(response)
+    tool_response = await run_query(sql_text, mock_db_connection2)
+
+    #validate tool_response
+    assert(isinstance(tool_response, (list, tuple)) and len(tool_response) == 1 and isinstance(tool_response[0], dict))
+    column_records = tool_response[0]
+    assert(len(column_records) == len(columns))
+    for col_name in columns:
+        assert(col_name in column_records)
+
+def test_detect_mutating_keywords():
+    test_sqls = [
+        # DML
+        r"""WITH new_users AS (
+        SELECT * FROM staging_users WHERE is_valid = true
+    )
+    INSERT INTO users (id, name, email)
+    SELECT id, name, email FROM new_users
+    RETURNING id;""",
+
+        r"""UPDATE orders
+    SET status = 'shipped'
+    WHERE id IN (
+        SELECT order_id FROM shipping_queue WHERE priority = 'high'
+    )
+    RETURNING id;""",
+
+        r"""WITH old_logs AS (
+        SELECT id FROM logs WHERE created_at < NOW() - INTERVAL '30 days'
+    )
+    DELETE FROM logs WHERE id IN (SELECT id FROM old_logs);""",
+
+        # DDL
+        r"""CREATE TABLE IF NOT EXISTS archive_data AS
+    SELECT * FROM data WHERE created_at < NOW() - INTERVAL '1 year';""",
+
+        r"""DROP TABLE IF EXISTS temp_data, old_archive CASCADE;""",
+
+        r"""ALTER TABLE users
+    ADD COLUMN last_login TIMESTAMP,
+    ALTER COLUMN email SET NOT NULL;""",
+
+        # Functions & Procedural
+        r"""CREATE FUNCTION log_activity() RETURNS trigger AS $$
+    BEGIN
+    INSERT INTO activity_log(user_id, action) VALUES (NEW.id, 'inserted');
+    RETURN NEW;
+    END;
+    $$ LANGUAGE plpgsql;""",
+
+        r"""DROP FUNCTION IF EXISTS log_activity();""",
+
+        # Permissions
+        r"""GRANT SELECT, INSERT ON orders TO analyst_role;""",
+
+        r"""REVOKE ALL ON users FROM guest_role;""",
+
+        # Index & View Management
+        r"""CREATE INDEX IF NOT EXISTS idx_users_active ON users (last_login) WHERE is_active = true;""",
+        r"""DROP INDEX IF EXISTS idx_users_active;""",
+        r"""REINDEX TABLE users;""",
+
+        r"""CREATE VIEW vip_customers AS
+    SELECT * FROM customers WHERE loyalty_tier = 'Platinum';""",
+        r"""DROP VIEW IF EXISTS vip_customers CASCADE;""",
+
+        r"""CREATE MATERIALIZED VIEW recent_signups AS
+    SELECT * FROM users WHERE created_at > CURRENT_DATE - INTERVAL '30 days';""",
+        r"""DROP MATERIALIZED VIEW IF EXISTS recent_signups;""",
+
+        # Sequences
+        r"""CREATE SEQUENCE user_id_seq START 1000 INCREMENT 5;""",
+        r"""ALTER SEQUENCE user_id_seq RESTART WITH 5000;""",
+        r"""DROP SEQUENCE IF EXISTS user_id_seq;""",
+
+        # Types & Domains
+        r"""CREATE TYPE currency AS ENUM ('USD', 'EUR', 'JPY');""",
+        r"""DROP TYPE IF EXISTS currency;""",
+        r"""CREATE DOMAIN us_phone_number AS TEXT CHECK (VALUE ~ '^\\(\\d{3}\\) \\d{3}-\\d{4}$');""",
+        r"""DROP DOMAIN IF EXISTS us_phone_number;""",
+
+        # Schemas & Aggregates
+        r"""CREATE SCHEMA reporting;""",
+        r"""DROP SCHEMA IF EXISTS reporting CASCADE;""",
+        r"""CREATE AGGREGATE product_sum (sfunc = int4mul, basetype = int, stype = int);""",
+        r"""DROP AGGREGATE IF EXISTS product_sum(int);""",
+
+        # Roles & Users
+        r"""CREATE ROLE data_analyst LOGIN PASSWORD 'an@lyt1c';""",
+        r"""ALTER ROLE data_analyst SET search_path = analytics, public;""",
+        r"""DROP ROLE IF EXISTS data_analyst;""",
+        r"""CREATE USER batch_processor WITH PASSWORD 'proc123';""",
+        r"""DROP USER IF EXISTS batch_processor;""",
+
+        # PL & Procedures
+        r"""CREATE PROCEDURE cleanup_old_data() LANGUAGE plpgsql AS $$
+    BEGIN
+    DELETE FROM logs WHERE created_at < NOW() - INTERVAL '6 months';
+    END;
+    $$;""",
+        r"""DROP PROCEDURE IF EXISTS cleanup_old_data();""",
+        r"""CREATE LANGUAGE IF NOT EXISTS plpython3u;""",
+        r"""DROP LANGUAGE IF EXISTS plpython3u;""",
+
+        # Extensions
+        r"""CREATE EXTENSION IF NOT EXISTS pg_trgm;""",
+        r"""DROP EXTENSION IF EXISTS pg_trgm;""",
+        r"""ALTER EXTENSION pg_trgm UPDATE;""",
+
+        # Runtime & Config
+        r"""ALTER SYSTEM SET shared_buffers = '512MB';""",
+
+        # Security
+        r"""SECURITY LABEL FOR selinux ON FUNCTION log_activity IS 'system_u:object_r:sepgsql_proc_exec_t:s0';"""
+    ]
+
+    for sql in test_sqls:
+        assert(detect_mutating_keywords(sql))
+
+
 if __name__ == "__main__":
+    test_detect_non_mutating_keywords()
+    test_detect_mutating_keywords()
+
     DBConnectionSingleton.initialize('mock', 'mock', 'mock', 'mock', readonly = True, is_test = True)
     asyncio.run(test_run_query_well_formatted_response())
-    test_run_query_readonly_allowed()
+    asyncio.run(test_run_query_write_prohibited())

@@ -18,9 +18,16 @@ from loguru import logger
 from typing import Optional, List, Dict, Annotated, Any
 import boto3
 from botocore.exceptions import ClientError
+from botocore.exceptions import BotoCoreError
 from pydantic import Field
 from mcp.server.fastmcp import FastMCP
 from awslabs.postgres_mcp_server.mutable_sql_detector import detect_mutating_keywords
+import traceback
+
+client_error_code_key = "run_query ClientError code"
+client_error_message_key = "run_query ClientError message"
+unexpected_error_key = "run_query unexpected error"
+write_query_prohibited_key = "Your MCP tool only allows readonly query. If you want to write, change the MCP configuration per README.md"
 
 class DBConnection:
     def __init__(self, cluster_arn, secret_arn, database, region, readonly, is_test = False):
@@ -80,6 +87,18 @@ def parse_execute_response(response: dict) -> list[dict]:
 
     return records
 
+def is_error_response(response : list[dict]) -> bool:
+    global client_error_code_key
+    global unexpected_error_key
+    global write_query_prohibited_key
+
+    if not list:
+        return False
+    
+    if client_error_code_key in response[0] or unexpected_error_key in response[0] or write_query_prohibited_key in response[0]:
+        return True
+    return False
+
 mcp = FastMCP(
     'apg-mcp MCP server. This is the starting point for all solutions created',
     dependencies=[
@@ -96,6 +115,11 @@ async def run_query(
     db_connection = None,
     query_parameters: Annotated[Optional[List[Dict[str, Any]]], Field(description="Parameters for the SQL query")] = None) -> list[dict]:
 
+    global client_error_code_key
+    global client_error_message_key
+    global unexpected_error_key
+    global write_query_prohibited_key
+
     if db_connection is None:
         db_connection = DBConnectionSingleton.get().db_connection
 
@@ -103,7 +127,7 @@ async def run_query(
         matches = detect_mutating_keywords(sql)
         if (bool)(matches):
             logger.info(f"query is rejected because current setting only allows readonly query. detected keywords: {matches}, SQL query: {sql}")
-            return [{"run_query only readonly query allowed": sql}]
+            return [{write_query_prohibited_key: sql}]
 
     try:
         logger.info(f"run_query: {sql}")
@@ -124,45 +148,41 @@ async def run_query(
         logger.success("run_query successfully executed query:{}", sql)
         return parse_execute_response(response)
     except ClientError as e:
-        logger.error(f"run_query ClientError: {e.response['Error']['Message']}")
-        return [{"run_query ClientError": f"{type(e).__name__}: {str(e)}"}]
+        logger.error(f"{client_error_code_key}: {e.response['Error']['Message']}")
+        return [{client_error_code_key: e.response['Error']['Code'], 
+                 client_error_message_key: e.response['Error']['Message']}]
     except Exception as e:
-        logger.error(f"run_query unexpected error: {e.response['Error']['Message']}")
-        return [{"run_query unexpected error": f"{type(e).__name__}: {str(e)}"}]
+        error_details = f"{type(e).__name__}: {str(e)}"
+        logger.error(f"{unexpected_error_key}: {error_details}")
+        return [{unexpected_error_key: f"{type(e).__name__}: {str(e)}"}]
 
 @mcp.tool(
     name="get_table_schema",
     description="Fetch table columns and comments from Postgres using RDS Data API"
 )
 async def get_table_schema(table_name: Annotated[str, Field(description="name of the table")]) -> list[dict]:
-    try:
-        logger.info(f"get_table_schema: {table_name}")
 
-        sql = f"""
-            SELECT 
-                a.attname AS column_name,
-                pg_catalog.format_type(a.atttypid, a.atttypmod) AS data_type,
-                col_description(a.attrelid, a.attnum) AS column_comment
-            FROM 
-                pg_attribute a
-            WHERE 
-                a.attrelid = '{table_name}'::regclass
-                AND a.attnum > 0
-                AND NOT a.attisdropped
-            ORDER BY a.attnum
-        """
+    logger.info(f"get_table_schema: {table_name}")
 
-        response = await run_query(sql)
-        logger.success("Successfully get_table_schema:{}", table_name)
-        return response
-    except ClientError as e:
-        logger.error(f"get_table_schema error: {e.response['Error']['Message']}")
-        return [{"get_table_schema ClientError": f"{type(e).__name__}: {str(e)}"}]
-    except Exception as e:
-        logger.error(f"get_table_schema unexpected error: {e.response['Error']['Message']}")
-        return [{"get_table_schema unexpected": f"{type(e).__name__}: {str(e)}"}]
+    sql = f"""
+        SELECT 
+            a.attname AS column_name,
+            pg_catalog.format_type(a.atttypid, a.atttypmod) AS data_type,
+            col_description(a.attrelid, a.attnum) AS column_comment
+        FROM 
+            pg_attribute a
+        WHERE 
+            a.attrelid = '{table_name}'::regclass
+            AND a.attnum > 0
+            AND NOT a.attisdropped
+        ORDER BY a.attnum
+    """
+
+    return await run_query(sql)
 
 def main():
+    global client_error_code_key
+
     """Run the MCP server with CLI argument support."""
     parser = argparse.ArgumentParser(description='An AWS Labs Model Context Protocol (MCP) server for postgres')
     parser.add_argument('--sse', action='store_true', help='Use SSE transport')
@@ -171,7 +191,7 @@ def main():
     parser.add_argument('--secret_arn', required=True, help='ARN of the Secrets Manager secret for database credentials')
     parser.add_argument('--database', required=True, help='Database name')
     parser.add_argument('--region', required=True, help='AWS region for RDS Data API (default: us-west-2)')
-    parser.add_argument('--readonly', required=True, help='Enforce NL to SQL only allows for readonly sql statement')
+    parser.add_argument('--readonly', required=True, help='Enforce NL to SQL to only allow readonly sql statement')
     args = parser.parse_args()
 
     logger.info("Postgres MCP init with CLUSTER_ARN:{}, SECRET_ARN:{}, REGION:{}, DATABASE:{}, READONLY:{}", 
@@ -179,12 +199,18 @@ def main():
     
     try:
         DBConnectionSingleton.initialize(args.resource_arn, args.secret_arn, args.database, args.region, args.readonly)
-        asyncio.run(run_query('SELECT 1'))
-    except Exception as e:
-        logger.error(f"Failed to create and validate db connection to Postgres. Exit the MCP server. error: {e.response['Error']['Message']}")
+    except BotoCoreError as e:
+        logger.error(f"Failed to RDS API client object for Postgres. Exit the MCP server. error: {str(e)}")
         sys.exit(1)
 
-    logger.success("Successfully validated connection to Postgres")
+    # Test RDS API connection
+    response = asyncio.run(run_query('SELECT 1'))
+    if is_error_response(response):
+        logger.error(f"Failed to validate RDS API db connection to Postgres. Exit the MCP server. error: {response[0][client_error_code_key]}")
+        sys.exit(1)
+
+
+    logger.success("Successfully validated RDS API db connection to Postgres")
 
     # Run server with appropriate transport
     if args.sse:
