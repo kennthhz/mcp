@@ -21,7 +21,7 @@ from botocore.exceptions import ClientError
 from botocore.exceptions import BotoCoreError
 from pydantic import Field
 from mcp.server.fastmcp import FastMCP
-from awslabs.postgres_mcp_server.mutable_sql_detector import detect_mutating_keywords
+from awslabs.postgres_mcp_server.mutable_sql_detector import detect_mutating_keywords, check_sql_injection_risk
 import traceback
 
 client_error_code_key = "run_query ClientError code"
@@ -94,10 +94,14 @@ def is_error_response(response : list[dict]) -> bool:
 
     if not list:
         return False
-    
+
     if client_error_code_key in response[0] or unexpected_error_key in response[0] or write_query_prohibited_key in response[0]:
         return True
-    return False
+    elif 'type' in response[0] and 'severity' in response[0]:
+        # signature matches risky parameter patterns
+        return True
+    else:
+        return False
 
 mcp = FastMCP(
     'apg-mcp MCP server. This is the starting point for all solutions created',
@@ -128,6 +132,12 @@ async def run_query(
         if (bool)(matches):
             logger.info(f"query is rejected because current setting only allows readonly query. detected keywords: {matches}, SQL query: {sql}")
             return [{write_query_prohibited_key: sql}]
+
+    if query_parameters is not None:
+        issues = check_sql_injection_risk(query_parameters)
+        if issues:
+            logger.info(f"query is rejected because it contains risky SQL pattern, SQL query: {sql}, reasons: {issues}")
+            return issues
 
     try:
         logger.info(f"run_query: {sql}")

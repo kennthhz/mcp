@@ -18,7 +18,7 @@ import datetime
 import decimal
 from conftest import Mock_DBConnection
 from awslabs.postgres_mcp_server.server import run_query, DBConnectionSingleton, write_query_prohibited_key, is_error_response
-from awslabs.postgres_mcp_server.mutable_sql_detector import detect_mutating_keywords
+from awslabs.postgres_mcp_server.mutable_sql_detector import detect_mutating_keywords, check_sql_injection_risk
 
 def wrap_value(val):
     """
@@ -285,6 +285,16 @@ async def test_run_query_write_prohibited():
     for col_name in columns:
         assert(col_name in column_records)
 
+@pytest.mark.asyncio
+async def test_run_query_risky_parameters():
+    DBConnectionSingleton.initialize('mock', 'mock', 'mock', 'mock', readonly = True, is_test = True)
+    mock_db_connection = Mock_DBConnection(True)
+
+    sql_text=r"""SELECT 1"""
+    query_parameters = [{'name': 'id', 'value': {'stringValue': "1 OR 1=1"}}]
+    tool_response = await run_query(sql_text, mock_db_connection,query_parameters )
+    assert(is_error_response(tool_response))
+
 def test_detect_mutating_keywords():
     test_sqls = [
         # DML
@@ -394,11 +404,49 @@ def test_detect_mutating_keywords():
     for sql in test_sqls:
         assert(detect_mutating_keywords(sql))
 
+def test_safe_param():
+    params = [{'name': 'id', 'value': {'stringValue': '123'}}]
+    result = check_sql_injection_risk(params)
+    assert result == []
+
+def test_none_parameters_should_be_safe():
+    params = None
+    result = check_sql_injection_risk(params)
+    assert result == []
+
+def test_or_true_clause_in_param():
+    params = [{'name': 'id', 'value': {'stringValue': "1 OR 1=1"}}]
+    result = check_sql_injection_risk(params)
+    assert any("1 OR 1=1" in r["message"] for r in result)
+
+def test_union_select_in_param():
+    params = [{'name': 'name', 'value': {'stringValue': "' UNION SELECT * FROM passwords --"}}]
+    result = check_sql_injection_risk(params)
+    assert any("union" in r["message"].lower() for r in result)
+
+def test_semicolon_in_param():
+    params = [{'name': 'id', 'value': {'stringValue': "1; DROP TABLE users;"}}]
+    result = check_sql_injection_risk(params)
+    assert any(";" in r["message"] for r in result)
+
+def test_multiple_risks_in_param():
+    params = [{'name': 'id', 'value': {'stringValue': "'; DROP TABLE users --"}}]
+    result = check_sql_injection_risk(params)
+    assert len(result) == 1
+    assert result[0]["type"] == "parameter"
+    assert "drop" in result[0]["message"].lower()
 
 if __name__ == "__main__":
     test_detect_non_mutating_keywords()
     test_detect_mutating_keywords()
+    test_safe_param()
+    test_none_parameters_should_be_safe()
+    test_or_true_clause_in_param()
+    test_union_select_in_param()
+    test_semicolon_in_param()
+    test_multiple_risks_in_param()
 
     DBConnectionSingleton.initialize('mock', 'mock', 'mock', 'mock', readonly = True, is_test = True)
     asyncio.run(test_run_query_well_formatted_response())
     asyncio.run(test_run_query_write_prohibited())
+    asyncio.run(test_run_query_risky_parameters())

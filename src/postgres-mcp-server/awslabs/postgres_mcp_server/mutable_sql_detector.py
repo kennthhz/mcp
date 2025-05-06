@@ -1,3 +1,14 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License"). You may not use this file except in compliance
+# with the License. A copy of the License is located at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# or in the 'license' file accompanying this file. This file is distributed on an 'AS IS' BASIS, WITHOUT WARRANTIES
+# OR CONDITIONS OF ANY KIND, express or implied. See the License for the specific language governing permissions
+# and limitations under the License.
+
 import re
 
 MUTATING_KEYWORDS = {
@@ -19,6 +30,17 @@ MUTATING_KEYWORDS = {
     # Storage-level
     "CLUSTER", "REINDEX", "VACUUM", "ANALYZE",
 }
+
+SUSPICIOUS_PATTERNS = [
+    r"(?i)'.*?--",
+    r"(?i)'.*?or\s+1=1",
+    r"(?i)\bunion\b.*\bselect\b",
+    r"(?i)\bdrop\b",
+    r"(?i)\btruncate\b",
+    r"(?i)\bgrant\b|\brevoke\b",
+    r"(?i);",
+    r"(?i)or\s+['\"]?\d+=\d+",
+]
 
 # Compile regex pattern
 MUTATING_PATTERN = re.compile(
@@ -42,3 +64,21 @@ def detect_mutating_keywords(sql_text: str) -> list[str]:
     cleaned_sql = remove_strings(cleaned_sql)
     matches = MUTATING_PATTERN.findall(cleaned_sql)
     return list(set(m.upper() for m in matches))  # Deduplicated and normalized to uppercase
+
+def check_sql_injection_risk(parameters: list[dict] | None) -> list[dict]:
+    issues = []
+
+    if parameters is not None:
+        for param in parameters:
+            value = next(iter(param['value'].values()))
+            for pattern in SUSPICIOUS_PATTERNS:
+                if re.search(pattern, str(value)):
+                    issues.append({
+                        "type": "parameter",
+                        "parameter_name": param['name'],
+                        "message": f"Suspicious pattern in value: {value}",
+                        "severity": "high"
+                    })
+                    break
+
+    return issues
