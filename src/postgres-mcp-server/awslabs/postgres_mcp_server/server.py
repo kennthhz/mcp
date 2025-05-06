@@ -20,26 +20,33 @@ import boto3
 from botocore.exceptions import ClientError
 from pydantic import Field
 from mcp.server.fastmcp import FastMCP
+from awslabs.postgres_mcp_server.mutable_sql_detector import detect_mutating_keywords
 
 class DBConnection:
-    def __init__(self, cluster_arn, secret_arn, database, region):
+    def __init__(self, cluster_arn, secret_arn, database, region, readonly, is_test = False):
         self.cluster_arn = cluster_arn
         self.secret_arn = secret_arn
         self.database = database
-        self.data_client = boto3.client('rds-data', region_name = region)
+        self.readonly = readonly
+        if not is_test:
+            self.data_client = boto3.client('rds-data', region_name = region)
+
+    @property
+    def readonly_query(self):
+        return self.readonly
 
 class DBConnectionSingleton:
     _instance = None
 
-    def __init__(self, resource_arn, secret_arn, database, region):
+    def __init__(self, resource_arn, secret_arn, database, region, readonly, is_test = False):
         if not all([resource_arn, secret_arn, database, region]):
             raise ValueError("All connection parameters must be provided for initial initialization")
-        self._db_connection = DBConnection(resource_arn, secret_arn, database, region)
+        self._db_connection = DBConnection(resource_arn, secret_arn, database, region, readonly, is_test)
 
     @classmethod
-    def initialize(cls, resource_arn, secret_arn, database, region):
+    def initialize(cls, resource_arn, secret_arn, database, region, readonly, is_test = False):
         if cls._instance is None:
-            cls._instance = cls(resource_arn, secret_arn, database, region)
+            cls._instance = cls(resource_arn, secret_arn, database, region, readonly, is_test)
 
     @classmethod
     def get(cls):
@@ -85,12 +92,21 @@ mcp = FastMCP(
     description = 'Run a SQL query using boto3 execute_statement'
 )
 async def run_query(
-    sql : Annotated[str, Field(description="The SQL query to run")], 
+    sql : Annotated[str, Field(description="The SQL query to run")],
+    db_connection = None,
     query_parameters: Annotated[Optional[List[Dict[str, Any]]], Field(description="Parameters for the SQL query")] = None) -> list[dict]:
+
+    if db_connection is None:
+        db_connection = DBConnectionSingleton.get().db_connection
+
+    if db_connection.readonly_query:
+        matches = detect_mutating_keywords(sql)
+        if (bool)(matches):
+            logger.info(f"query is rejected because current setting only allows readonly query. detected keywords: {matches}, SQL query: {sql}")
+            return [{"run_query only readonly query allowed": sql}]
+
     try:
         logger.info(f"run_query: {sql}")
-
-        db_connection = DBConnectionSingleton.get().db_connection
 
         execute_params = {
             'resourceArn': db_connection.cluster_arn,
@@ -154,14 +170,15 @@ def main():
     parser.add_argument('--resource_arn', required=True, help='ARN of the RDS cluster')
     parser.add_argument('--secret_arn', required=True, help='ARN of the Secrets Manager secret for database credentials')
     parser.add_argument('--database', required=True, help='Database name')
-    parser.add_argument('--region', required=True, default='us-west-2', help='AWS region for RDS Data API (default: us-west-2)')
+    parser.add_argument('--region', required=True, help='AWS region for RDS Data API (default: us-west-2)')
+    parser.add_argument('--readonly', required=True, help='Enforce NL to SQL only allows for readonly sql statement')
     args = parser.parse_args()
 
-    logger.info("Postgres MCP init with CLUSTER_ARN:{}, SECRET_ARN:{}, REGION:{}, DATABASE:{}", 
-                args.resource_arn, args.secret_arn, args.region, args.database)
+    logger.info("Postgres MCP init with CLUSTER_ARN:{}, SECRET_ARN:{}, REGION:{}, DATABASE:{}, READONLY:{}", 
+                args.resource_arn, args.secret_arn, args.region, args.database, args.readonly)
     
     try:
-        DBConnectionSingleton.initialize(args.resource_arn, args.secret_arn, args.database, args.region)
+        DBConnectionSingleton.initialize(args.resource_arn, args.secret_arn, args.database, args.region, args.readonly)
         asyncio.run(run_query('SELECT 1'))
     except Exception as e:
         logger.error(f"Failed to create and validate db connection to Postgres. Exit the MCP server. error: {e.response['Error']['Message']}")
