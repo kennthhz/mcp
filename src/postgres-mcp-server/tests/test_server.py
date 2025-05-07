@@ -10,15 +10,29 @@
 # and limitations under the License.
 """Tests for the postgres MCP Server."""
 
+import sys
 import asyncio
 import pytest
 import json
 import uuid
 import datetime
 import decimal
+<<<<<<< HEAD
 from conftest import Mock_DBConnection, DummyCtx
 from awslabs.postgres_mcp_server.server import run_query, DBConnectionSingleton, write_query_prohibited_key
 from awslabs.postgres_mcp_server.mutable_sql_detector import detect_mutating_keywords, check_sql_injection_risk
+=======
+import json
+import pytest
+import sys
+import uuid
+from awslabs.postgres_mcp_server.mutable_sql_detector import (
+    check_sql_injection_risk,
+    detect_mutating_keywords,
+)
+from awslabs.postgres_mcp_server.server import DBConnectionSingleton, main, run_query
+from conftest import DummyCtx, Mock_DBConnection
+>>>>>>> ca72a59 (improve test coverage)
 
 def wrap_value(val):
     """
@@ -415,6 +429,38 @@ def test_main_with_invalid_parameters(monkeypatch, capsys):
         ],
     )
     monkeypatch.setattr('awslabs.postgres_mcp_server.server.mcp.run', lambda: None)
+
+    # This test of main() will succeed in parsing parameters and create connection object.
+    # However, since connection object is not boto3 client with real credential, the validate of connection will fail and cause system exit
+    with pytest.raises(SystemExit) as excinfo:
+        main()
+    assert excinfo.value.code == 1
+
+
+def test_main_with_valid_parameters(monkeypatch, capsys):
+    monkeypatch.setattr(sys, 'argv', ['server.py', 
+                                      '--resource_arn', 'arn:aws:rds:us-west-2:123456789012:cluster:example-cluster-name', 
+                                      '--secret_arn', 'arn:aws:secretsmanager:us-west-2:123456789012:secret:my-secret-name-abc123',
+                                       '--database', 'postgres', 
+                                       '--region', 'us-west-2', 
+                                       '--readonly', 'True'])
+    monkeypatch.setattr("awslabs.postgres_mcp_server.server.mcp.run", lambda: None)
+
+    # This test of main() will succeed in parsing parameters and create connection object.
+    # However, since connection object is not boto3 client with real credential, the validate of connection will fail and cause system exit
+    with pytest.raises(SystemExit) as excinfo:
+        main()
+    assert excinfo.value.code == 1
+
+
+def test_main_with_invalid_parameters(monkeypatch, capsys):
+    monkeypatch.setattr(sys, 'argv', ['server.py', 
+                                      '--resource_arn', 'invalid', 
+                                      '--secret_arn', 'invalid',
+                                       '--database', 'postgres', 
+                                       '--region', 'invalid', 
+                                       '--readonly', 'True'])
+    monkeypatch.setattr("awslabs.postgres_mcp_server.server.mcp.run", lambda: None)
 
     # This test of main() will succeed in parsing parameters and create connection object.
     # However, since connection object is not boto3 client with real credential, the validate of connection will fail and cause system exit
