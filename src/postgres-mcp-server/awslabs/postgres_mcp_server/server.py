@@ -212,6 +212,7 @@ async def run_query(
                 f'query is rejected because current setting only allows readonly query. detected keywords: {matches}, SQL query: {sql}'
             )
             await ctx.error(write_query_prohibited_key)
+            return []
 
     if query_parameters is not None:
         issues = check_sql_injection_risk(query_parameters)
@@ -220,8 +221,9 @@ async def run_query(
                 f'query is rejected because it contains risky SQL pattern, SQL query: {sql}, reasons: {issues}'
             )
             await ctx.error(
-                {'message': 'Query parameter contains suspicious pattern', 'details': issues}
+                str({'message': 'Query parameter contains suspicious pattern', 'details': issues})
             )
+            return []
 
     try:
         logger.info(f'run_query: {sql}')
@@ -248,10 +250,12 @@ async def run_query(
         await ctx.error(
             str({'code': e.response['Error']['Code'], 'message': e.response['Error']['Message']})
         )
+        return []
     except Exception as e:
         error_details = f'{type(e).__name__}: {str(e)}'
         logger.error(f'{unexpected_error_key}: {error_details}')
         await ctx.error(str({'message': error_details}))
+        return []
 
 
 @mcp.tool(
