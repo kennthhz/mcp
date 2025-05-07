@@ -383,6 +383,7 @@ MOCK_ROWS = [
     None,  # NULL
 ]
 
+
 def wrap_value(val):
     """Convert a Python value into an AWS RDS Data API-compatible field dict."""
     if isinstance(val, str):
