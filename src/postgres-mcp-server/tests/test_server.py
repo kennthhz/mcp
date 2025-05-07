@@ -28,6 +28,7 @@ from awslabs.postgres_mcp_server.server import (
 )
 from conftest import DummyCtx, Mock_DBConnection
 
+
 def wrap_value(val):
     """Convert a Python value into an AWS RDS Data API-compatible field dict."""
     if isinstance(val, str):
