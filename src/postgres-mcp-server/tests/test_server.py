@@ -16,8 +16,8 @@ import json
 import uuid
 import datetime
 import decimal
-from conftest import Mock_DBConnection
-from awslabs.postgres_mcp_server.server import run_query, DBConnectionSingleton, write_query_prohibited_key, is_error_response
+from conftest import Mock_DBConnection, DummyCtx
+from awslabs.postgres_mcp_server.server import run_query, DBConnectionSingleton, write_query_prohibited_key
 from awslabs.postgres_mcp_server.mutable_sql_detector import detect_mutating_keywords, check_sql_injection_risk
 
 def wrap_value(val):
@@ -125,8 +125,9 @@ async def test_run_query_well_formatted_response():
         rows=[row]
     )
 
+    ctx = DummyCtx()
     mock_db_connection.data_client.add_mock_response(response)
-    tool_response = await run_query(sql_text, mock_db_connection)
+    tool_response = await run_query(sql_text, ctx, mock_db_connection)
 
     #validate tool_response
     assert(isinstance(tool_response, (list, tuple)) and len(tool_response) == 1 and isinstance(tool_response[0], dict))
@@ -144,8 +145,10 @@ async def test_run_query_bad_rds_response():
 
     response = [{"bad":"bad"}]
     mock_db_connection.data_client.add_mock_response(response)
-    tool_response = await run_query(sql_text, mock_db_connection)
-    assert(is_error_response(tool_response))
+
+    ctx = DummyCtx()
+    with pytest.raises(RuntimeError):
+         await run_query(sql_text, ctx, mock_db_connection)
 
 @pytest.mark.asyncio
 async def test_run_query_risky_parameters():
@@ -154,16 +157,20 @@ async def test_run_query_risky_parameters():
 
     sql_text=r"""SELECT 1"""
     query_parameters = [{'name': 'id', 'value': {'stringValue': "1 OR 1=1"}}]
-    tool_response = await run_query(sql_text, mock_db_connection,query_parameters)
-    assert(is_error_response(tool_response))
+
+    ctx = DummyCtx()
+    with pytest.raises(RuntimeError):
+        await run_query(sql_text, ctx, mock_db_connection,query_parameters)
 
 @pytest.mark.asyncio
 async def test_run_query_throw_client_error():
     DBConnectionSingleton.initialize('mock', 'mock', 'mock', 'mock', readonly = True, is_test = True)
     mock_db_connection = Mock_DBConnection(True, True)
     sql_text=r"""SELECT 1"""
-    tool_response = await run_query(sql_text, mock_db_connection)
-    assert(is_error_response(tool_response))
+
+    ctx = DummyCtx()
+    with pytest.raises(RuntimeError):
+        await run_query(sql_text, ctx, mock_db_connection)
 
 @pytest.mark.asyncio
 async def test_run_query_write_prohibited():
@@ -179,8 +186,9 @@ async def test_run_query_write_prohibited():
     SELECT id, name, email FROM new_users
     RETURNING id;"""
 
-    tool_response = await run_query(sql_text, mock_db_connection)
-    assert(is_error_response(tool_response))
+    ctx = DummyCtx()
+    with pytest.raises(RuntimeError):
+        await run_query(sql_text, ctx, mock_db_connection)
 
     # Set readonly to be false and send write query
     mock_db_connection2 = Mock_DBConnection(False)
@@ -211,7 +219,7 @@ async def test_run_query_write_prohibited():
     )
 
     mock_db_connection2.data_client.add_mock_response(response)
-    tool_response = await run_query(sql_text, mock_db_connection2)
+    tool_response = await run_query(sql_text, ctx, mock_db_connection2)
 
     #validate tool_response
     assert(isinstance(tool_response, (list, tuple)) and len(tool_response) == 1 and isinstance(tool_response[0], dict))

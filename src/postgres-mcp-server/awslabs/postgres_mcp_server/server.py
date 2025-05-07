@@ -20,16 +20,20 @@ import boto3
 from botocore.exceptions import ClientError
 from botocore.exceptions import BotoCoreError
 from pydantic import Field
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import Context, FastMCP
 from awslabs.postgres_mcp_server.mutable_sql_detector import detect_mutating_keywords, check_sql_injection_risk
-import traceback
 
 client_error_code_key = "run_query ClientError code"
-client_error_message_key = "run_query ClientError message"
 unexpected_error_key = "run_query unexpected error"
 write_query_prohibited_key = "Your MCP tool only allows readonly query. If you want to write, change the MCP configuration per README.md"
 
+class DummyCtx:
+    def error(self, message):
+        raise RuntimeError(f"MCP Tool Error: {message}")
+
 class DBConnection:
+    """Class that wraps DB connection client by RDS API"""
+
     def __init__(self, cluster_arn, secret_arn, database, region, readonly, is_test = False):
         self.cluster_arn = cluster_arn
         self.secret_arn = secret_arn
@@ -43,11 +47,17 @@ class DBConnection:
         return self.readonly
 
 class DBConnectionSingleton:
+    """Manages a single DBConnection instance across the application.
+    
+    This singleton ensures that only one DBConnection is created and reused.
+    """
+
     _instance = None
 
     def __init__(self, resource_arn, secret_arn, database, region, readonly, is_test = False):
         if not all([resource_arn, secret_arn, database, region]):
-            raise ValueError("All connection parameters must be provided for initial initialization")
+            raise ValueError("Missing required connection parameters. "
+                "Please provide resource_arn, secret_arn, database, and region.")
         self._db_connection = DBConnection(resource_arn, secret_arn, database, region, readonly, is_test)
 
     @classmethod
@@ -60,7 +70,7 @@ class DBConnectionSingleton:
         if cls._instance is None:
             raise RuntimeError("DBConnectionSingleton is not initialized.")
         return cls._instance
-    
+
     @property
     def db_connection(self):
         return self._db_connection
@@ -87,22 +97,6 @@ def parse_execute_response(response: dict) -> list[dict]:
 
     return records
 
-def is_error_response(response : list[dict]) -> bool:
-    global client_error_code_key
-    global unexpected_error_key
-    global write_query_prohibited_key
-
-    if not list:
-        return False
-
-    if client_error_code_key in response[0] or unexpected_error_key in response[0] or write_query_prohibited_key in response[0]:
-        return True
-    elif 'type' in response[0] and 'severity' in response[0]:
-        # signature matches risky parameter patterns
-        return True
-    else:
-        return False
-
 mcp = FastMCP(
     'apg-mcp MCP server. This is the starting point for all solutions created',
     dependencies=[
@@ -116,11 +110,23 @@ mcp = FastMCP(
 )
 async def run_query(
     sql : Annotated[str, Field(description="The SQL query to run")],
+    ctx: Context,
     db_connection = None,
     query_parameters: Annotated[Optional[List[Dict[str, Any]]], Field(description="Parameters for the SQL query")] = None) -> list[dict]:
 
+    """Run a SQL query using boto3 execute_statement
+
+    Args:
+        sql: The sql statement to run
+        ctx: MCP context for logging and state management
+        db_connection: DB connection object passed by unit test. It should be None if if called by MCP server.
+        query_parameters: Parameters for the SQL query
+
+    Returns:
+        List of dictionary that contains query response rows
+    """
+
     global client_error_code_key
-    global client_error_message_key
     global unexpected_error_key
     global write_query_prohibited_key
 
@@ -131,13 +137,16 @@ async def run_query(
         matches = detect_mutating_keywords(sql)
         if (bool)(matches):
             logger.info(f"query is rejected because current setting only allows readonly query. detected keywords: {matches}, SQL query: {sql}")
-            return [{write_query_prohibited_key: sql}]
+            await ctx.error(write_query_prohibited_key)
 
     if query_parameters is not None:
         issues = check_sql_injection_risk(query_parameters)
         if issues:
             logger.info(f"query is rejected because it contains risky SQL pattern, SQL query: {sql}, reasons: {issues}")
-            return issues
+            await ctx.error({
+                "message" : "Query parameter contains suspicious pattern",
+                "details" : issues
+            })
 
     try:
         logger.info(f"run_query: {sql}")
@@ -159,18 +168,32 @@ async def run_query(
         return parse_execute_response(response)
     except ClientError as e:
         logger.error(f"{client_error_code_key}: {e.response['Error']['Message']}")
-        return [{client_error_code_key: e.response['Error']['Code'], 
-                 client_error_message_key: e.response['Error']['Message']}]
+        await ctx.error({
+            "code": e.response['Error']['Code'],
+            "message": e.response['Error']['Message']
+        })
     except Exception as e:
         error_details = f"{type(e).__name__}: {str(e)}"
         logger.error(f"{unexpected_error_key}: {error_details}")
-        return [{unexpected_error_key: f"{type(e).__name__}: {str(e)}"}]
+        await ctx.error({
+            "message": error_details
+        })
 
 @mcp.tool(
     name="get_table_schema",
     description="Fetch table columns and comments from Postgres using RDS Data API"
 )
-async def get_table_schema(table_name: Annotated[str, Field(description="name of the table")]) -> list[dict]:
+async def get_table_schema(table_name: Annotated[str, Field(description="name of the table")], ctx: Context) -> list[dict]:
+
+    """Get a table's schema information given the table name
+
+    Args:
+        table_name: name of the table
+        ctx: MCP context for logging and state management
+
+    Returns:
+        List of dictionary that contains query response rows
+    """
 
     logger.info(f"get_table_schema: {table_name}")
 
@@ -188,7 +211,7 @@ async def get_table_schema(table_name: Annotated[str, Field(description="name of
         ORDER BY a.attnum
     """
 
-    return await run_query(sql)
+    return await run_query(sql, ctx)
 
 def main():
     global client_error_code_key
@@ -214,11 +237,12 @@ def main():
         sys.exit(1)
 
     # Test RDS API connection
-    response = asyncio.run(run_query('SELECT 1'))
-    if is_error_response(response):
-        logger.error(f"Failed to validate RDS API db connection to Postgres. Exit the MCP server. error: {response[0][client_error_code_key]}")
+    ctx = DummyCtx()
+    try:
+        asyncio.run(run_query('SELECT 1', ctx))
+    except Exception as e:
+        logger.error(f"Failed to validate RDS API db connection to Postgres. Exit the MCP server. error: {e}")
         sys.exit(1)
-
 
     logger.success("Successfully validated RDS API db connection to Postgres")
 

@@ -43,6 +43,10 @@ class Mock_DBConnection:
     @property
     def readonly_query(self):
         return self.reaodnly
+    
+class DummyCtx:
+    def error(self, message):
+        raise RuntimeError(f"MCP Tool Error: {message}")
 
 @pytest.fixture
 def mock_DBConnection():
