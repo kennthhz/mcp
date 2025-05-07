@@ -10,22 +10,18 @@
 # and limitations under the License.
 """Tests for the postgres MCP Server."""
 
-import sys
 import asyncio
 import datetime
 import decimal
 import json
 import pytest
+import sys
 import uuid
 from awslabs.postgres_mcp_server.mutable_sql_detector import (
     check_sql_injection_risk,
-    detect_mutating_keywords
+    detect_mutating_keywords,
 )
-from awslabs.postgres_mcp_server.server import (
-    DBConnectionSingleton,
-    run_query,
-    main
-)
+from awslabs.postgres_mcp_server.server import DBConnectionSingleton, main, run_query
 from conftest import DummyCtx, Mock_DBConnection
 
 
@@ -487,13 +483,34 @@ def test_multiple_risks_in_param():
 
 
 def test_main_with_valid_parameters(monkeypatch, capsys):
-    monkeypatch.setattr(sys, 'argv', ['server.py', 
-                                      '--resource_arn', 'arn:aws:rds:us-west-2:123456789012:cluster:example-cluster-name', 
-                                      '--secret_arn', 'arn:aws:secretsmanager:us-west-2:123456789012:secret:my-secret-name-abc123',
-                                       '--database', 'postgres', 
-                                       '--region', 'us-west-2', 
-                                       '--readonly', 'True'])
-    monkeypatch.setattr("awslabs.postgres_mcp_server.server.mcp.run", lambda: None)
+    """Test main function with valid command line parameters.
+
+    This test verifies that the main function correctly parses valid command line arguments
+    and attempts to initialize the database connection. The test expects a SystemExit
+    since we're not using real AWS credentials.
+
+    Args:
+        monkeypatch: pytest fixture for patching
+        capsys: pytest fixture for capturing stdout/stderr
+    """
+    monkeypatch.setattr(
+        sys,
+        'argv',
+        [
+            'server.py',
+            '--resource_arn',
+            'arn:aws:rds:us-west-2:123456789012:cluster:example-cluster-name',
+            '--secret_arn',
+            'arn:aws:secretsmanager:us-west-2:123456789012:secret:my-secret-name-abc123',
+            '--database',
+            'postgres',
+            '--region',
+            'us-west-2',
+            '--readonly',
+            'True',
+        ],
+    )
+    monkeypatch.setattr('awslabs.postgres_mcp_server.server.mcp.run', lambda: None)
 
     # This test of main() will succeed in parsing parameters and create connection object.
     # However, since connection object is not boto3 client with real credential, the validate of connection will fail and cause system exit
@@ -503,13 +520,34 @@ def test_main_with_valid_parameters(monkeypatch, capsys):
 
 
 def test_main_with_invalid_parameters(monkeypatch, capsys):
-    monkeypatch.setattr(sys, 'argv', ['server.py', 
-                                      '--resource_arn', 'invalid', 
-                                      '--secret_arn', 'invalid',
-                                       '--database', 'postgres', 
-                                       '--region', 'invalid', 
-                                       '--readonly', 'True'])
-    monkeypatch.setattr("awslabs.postgres_mcp_server.server.mcp.run", lambda: None)
+    """Test main function with invalid command line parameters.
+
+    This test verifies that the main function correctly handles invalid command line arguments
+    and exits with an error code. The test expects a SystemExit since the parameters
+    are invalid and we're not using real AWS credentials.
+
+    Args:
+        monkeypatch: pytest fixture for patching
+        capsys: pytest fixture for capturing stdout/stderr
+    """
+    monkeypatch.setattr(
+        sys,
+        'argv',
+        [
+            'server.py',
+            '--resource_arn',
+            'invalid',
+            '--secret_arn',
+            'invalid',
+            '--database',
+            'postgres',
+            '--region',
+            'invalid',
+            '--readonly',
+            'True',
+        ],
+    )
+    monkeypatch.setattr('awslabs.postgres_mcp_server.server.mcp.run', lambda: None)
 
     # This test of main() will succeed in parsing parameters and create connection object.
     # However, since connection object is not boto3 client with real credential, the validate of connection will fail and cause system exit
