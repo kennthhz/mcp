@@ -61,7 +61,7 @@ def mock_execute_statement_response(
     columns: list[str],
     rows: list[list],
     number_of_records_updated: int = 0,
-    generated_fields: list = None,
+    generated_fields: list | None = None,
 ):
     """Generate a complete mock RDS Data API response from a SQL query."""
     return {
@@ -81,7 +81,7 @@ def mock_execute_statement_response(
         ],
         'records': [[wrap_value(cell) for cell in row] for row in rows],
         'numberOfRecordsUpdated': number_of_records_updated,
-        'generatedFields': generated_fields or [],
+        'generatedFields': generated_fields if generated_fields is not None else [],
         'formattedRecords': '',
         'responseMetadata': {
             'RequestId': 'mock-request-id',

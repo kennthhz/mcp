@@ -53,17 +53,17 @@ class Mock_boto3_client:
 class Mock_DBConnection:
     """Mock implementation of DBConnection for testing purposes."""
 
-    def __init__(self, reaodnly, throw_client_error=False):
+    def __init__(self, readonly, throw_client_error=False):
         """Initialize the mock DB connection.
 
         Args:
-            reaodnly: Whether the connection should be read-only
+            readonly: Whether the connection should be read-only
             throw_client_error: Whether to simulate a client error
         """
         self.cluster_arn = 'dummy_cluster_arn'
         self.secret_arn = 'dummy_secret_arn'  # pragma: allowlist secret
         self.database = 'dummy_database'
-        self.reaodnly = reaodnly
+        self.readonly = readonly
         self.throw_client_error = throw_client_error
         self._data_client = Mock_boto3_client(throw_client_error)
 
@@ -83,7 +83,7 @@ class Mock_DBConnection:
         Returns:
             bool: True if the connection is read-only, False otherwise
         """
-        return self.reaodnly
+        return self.readonly
 
 
 class DummyCtx:
@@ -105,4 +105,4 @@ def mock_DBConnection():
     Returns:
         Mock_DBConnection: A mock database connection
     """
-    return Mock_DBConnection()
+    return Mock_DBConnection(readonly=True)

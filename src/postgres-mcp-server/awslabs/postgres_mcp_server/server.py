@@ -246,12 +246,12 @@ async def run_query(
     except ClientError as e:
         logger.error(f'{client_error_code_key}: {e.response["Error"]["Message"]}')
         await ctx.error(
-            {'code': e.response['Error']['Code'], 'message': e.response['Error']['Message']}
+            str({'code': e.response['Error']['Code'], 'message': e.response['Error']['Message']})
         )
     except Exception as e:
         error_details = f'{type(e).__name__}: {str(e)}'
         logger.error(f'{unexpected_error_key}: {error_details}')
-        await ctx.error({'message': error_details})
+        await ctx.error(str({'message': error_details}))
 
 
 @mcp.tool(
