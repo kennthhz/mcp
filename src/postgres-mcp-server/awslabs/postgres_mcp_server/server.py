@@ -97,6 +97,7 @@ def parse_execute_response(response: dict) -> list[dict]:
 
     return records
 
+
 mcp = FastMCP(
     'awslabs.postgres-mcp-server',
     instructions='You are an expert Postgres assistant. Use this run_query and get_table_schemawith to interfact with the database your.',
@@ -267,6 +268,7 @@ async def get_table_schema(table_name: Annotated[str, Field(description="name of
     """  # nosec B608: injection risk is handled inside run_query
 
     return await run_query(sql, ctx)
+
 
 
 def main():

@@ -57,6 +57,7 @@ def remove_strings(sql: str) -> str:
     return re.sub(r"('([^']|'')*')|(\"([^\"]|\"\")*\")", '', sql)
 
 
+
 def detect_mutating_keywords(sql_text: str) -> list[str]:
     """
     Return a list of mutating keywords found in the SQL (excluding comments).
