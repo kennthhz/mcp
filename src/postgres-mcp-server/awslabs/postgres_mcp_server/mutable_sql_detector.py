@@ -64,6 +64,7 @@ SUSPICIOUS_PATTERNS = [
 ]
 
 
+
 def detect_mutating_keywords(sql_text: str) -> list[str]:
     """Return a list of mutating keywords found in the SQL (excluding comments)."""
     matches = MUTATING_PATTERN.findall(sql_text)
