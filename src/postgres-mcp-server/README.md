@@ -26,19 +26,19 @@ An AWS Labs Model Context Protocol (MCP) server for Aurora Postgres
 3. Run 'docker build -t awslabs/postgres-mcp-server:latest .'
 
 ### Add or update your LLM client's config with following:
-<pre><code> 
+<pre><code>
 {
   "mcpServers": {
     "awslabs.postgres-mcp-server": {
       "command": "docker",
       "args": [
-        "run", 
-        "-i", 
+        "run",
+        "-i",
         "--rm",
         "-e", "AWS_ACCESS_KEY_ID=[your data]",
         "-e", "AWS_SECRET_ACCESS_KEY=[your data]",
         "-e", "AWS_REGION=[your data]",
-        "awslabs/postgres-mcp-server:latest", 
+        "awslabs/postgres-mcp-server:latest",
         "--resource_arn", "[your data]",
         "--secret_arn", "[your data]",
         "--database", "[your data]",
