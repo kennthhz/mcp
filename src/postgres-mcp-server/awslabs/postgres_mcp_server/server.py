@@ -266,10 +266,14 @@ async def get_table_schema(table_name: Annotated[str, Field(description="name of
             AND NOT a.attisdropped
         ORDER BY a.attnum
 <<<<<<< HEAD
+<<<<<<< HEAD
     """  # nosec B608: injection risk is handled inside run_query
 =======
     """ # nosec B608: injection risk is handled inside run_query
 >>>>>>> a9d3619 (address comments of false positive security detection)
+=======
+    """  # nosec B608: injection risk is handled inside run_query
+>>>>>>> 13f13cf (chore(build): pre commit checks)
 
     return await run_query(sql, ctx)
 
