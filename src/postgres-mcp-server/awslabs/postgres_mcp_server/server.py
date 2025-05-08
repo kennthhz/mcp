@@ -294,7 +294,7 @@ async def get_table_schema(
             AND a.attnum > 0
             AND NOT a.attisdropped
         ORDER BY a.attnum
-    """
+    """ # nosec B608: injection risk is handled inside run_query
 
     params = [{'name': 'table_name', 'value': {'stringValue': table_name}}]
 
