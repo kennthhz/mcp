@@ -216,6 +216,7 @@ async def run_query(
             await ctx.error(write_query_prohibited_key)
             return [{'error': write_query_prohibited_key}]
 
+<<<<<<< HEAD
     issues = check_sql_injection_risk(sql)
     if issues:
         logger.info(
@@ -225,6 +226,18 @@ async def run_query(
             str({'message': 'Query parameter contains suspicious pattern', 'details': issues})
         )
         return [{'error': query_injection_risk_key}]
+=======
+    if query_parameters is not None:
+        issues = check_sql_injection_risk(query_parameters)
+        if issues:
+            logger.info(
+                f'query is rejected because it contains risky SQL pattern, SQL query: {sql}, reasons: {issues}'
+            )
+            await ctx.error(
+                str({'message': 'Query parameter contains suspicious pattern', 'details': issues})
+            )
+            return [{'error': write_query_prohibited_key}]
+>>>>>>> 854391f (fix(postgres-mcp-server): issues with enforcing readonly query  (#312))
 
     try:
         logger.info(f'run_query: readonly:{db_connection.readonly_query}, SQL:{sql}')
@@ -256,12 +269,20 @@ async def run_query(
         await ctx.error(
             str({'code': e.response['Error']['Code'], 'message': e.response['Error']['Message']})
         )
+<<<<<<< HEAD
         return [{'error': client_error_code_key}]
+=======
+        return [{'error': write_query_prohibited_key}]
+>>>>>>> 854391f (fix(postgres-mcp-server): issues with enforcing readonly query  (#312))
     except Exception as e:
         logger.exception(unexpected_error_key)
         error_details = f'{type(e).__name__}: {str(e)}'
         await ctx.error(str({'message': error_details}))
+<<<<<<< HEAD
         return [{'error': unexpected_error_key}]
+=======
+        return [{'error': write_query_prohibited_key}]
+>>>>>>> 854391f (fix(postgres-mcp-server): issues with enforcing readonly query  (#312))
 
 
 @mcp.tool(

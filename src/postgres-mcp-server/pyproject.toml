@@ -1,6 +1,10 @@
 [project]
 name = "awslabs.postgres-mcp-server"
+<<<<<<< HEAD
 version = "0.0.4"
+=======
+version = "0.0.2"
+>>>>>>> 854391f (fix(postgres-mcp-server): issues with enforcing readonly query  (#312))
 description = "An AWS Labs Model Context Protocol (MCP) server for postgres"
 readme = "README.md"
 requires-python = ">=3.10"
