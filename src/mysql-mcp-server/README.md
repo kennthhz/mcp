@@ -27,10 +27,10 @@ Here are some ways you can work with MCP across AWS, and we'll be adding support
 ```json
 {
   "mcpServers": {
-    "awslabs.MySQL-mcp-server": {
+    "awslabs.mysql-mcp-server": {
       "command": "uvx",
       "args": [
-        "awslabs.MySQL-mcp-server@latest",
+        "awslabs.mysql-mcp-server@latest",
         "--resource_arn", "[your data]",
         "--secret_arn", "[your data]",
         "--database", "[your data]",
@@ -52,14 +52,14 @@ Here are some ways you can work with MCP across AWS, and we'll be adding support
 ### Build and install docker image locally on the same host of your LLM client
 
 1. 'git clone https://github.com/awslabs/mcp.git'
-2. Go to sub-directory 'src/MySQL-mcp-server/'
-3. Run 'docker build -t awslabs/MySQL-mcp-server:latest .'
+2. Go to sub-directory 'src/mysql-mcp-server/'
+3. Run 'docker build -t awslabs/mysql-mcp-server:latest .'
 
 ### Add or update your LLM client's config with following:
 <pre><code>
 {
   "mcpServers": {
-    "awslabs.MySQL-mcp-server": {
+    "awslabs.mysql-mcp-server": {
       "command": "docker",
       "args": [
         "run",
@@ -68,7 +68,7 @@ Here are some ways you can work with MCP across AWS, and we'll be adding support
         "-e", "AWS_ACCESS_KEY_ID=[your data]",
         "-e", "AWS_SECRET_ACCESS_KEY=[your data]",
         "-e", "AWS_REGION=[your data]",
-        "awslabs/MySQL-mcp-server:latest",
+        "awslabs/mysql-mcp-server:latest",
         "--resource_arn", "[your data]",
         "--secret_arn", "[your data]",
         "--database", "[your data]",
