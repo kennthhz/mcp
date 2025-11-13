@@ -14,63 +14,87 @@
 
 """Database connection map for postgres MCP Server."""
 
-from typing import Annotated
-from pydantic import Field
-from awslabs.postgres_mcp_server.connection.abstract_db_connection import AbstractDBConnection
-from awslabs.postgres_mcp_server.connection.rds_api_connection import RDSDataAPIConnection
-from loguru import logger
 import threading
+from enum import Enum
+from loguru import logger
+from typing import Annotated
 
-db_connection_map_lock = threading.Lock()
+from awslabs.postgres_mcp_server.connection.abstract_db_connection import AbstractDBConnection
+
+class ConnectionMethod(str, Enum):
+    RDS_API = "rdsapi"
+    PG_WIRE_PROTOCOL = "pgwire"
 
 class DBConnectionMap:
     """Manages Postgres DB connection map"""
 
     def __init__(self):
-        self.map = dict()
+        self.map = {} 
+        self._lock = threading.Lock()
     
     def get(
         self,
-        connection_key: Annotated[str, Field(description='Cluster identifer or host name, must not be None')],
-        database: Annotated[str, Field(description='Database name, must not be None')]
-    ) -> AbstractDBConnection:
-        global db_connection_map_lock
+        method: ConnectionMethod,
+        cluster_identifier_or_hostname: str,
+        database: str,
+    ) -> AbstractDBConnection | None:
 
-        if not connection_key:
-            raise ValueError("connection_key cannot be None or empty") 
+        if not cluster_identifier_or_hostname:
+            raise ValueError("cluster_identifier_or_hostname cannot be None or empty") 
         
         if not database:
             raise ValueError("database cannot be None or empty") 
         
-        try:
-            db_connection_map_lock.acquire()
-            return self.map[(connection_key, database)]
-        finally:
-            db_connection_map_lock.release()
+        with self._lock:
+            return self.map.get((method, cluster_identifier_or_hostname, database))
 
     def set(
         self,
-        connection_key: Annotated[str, Field(description='Cluster identifer or host name, must not be None')],
-        database: Annotated[str, Field(description='Database name, must not be None')],
-        conn: Annotated[AbstractDBConnection, Field(description='Connection objec, must not be None')]
+        method: ConnectionMethod,
+        cluster_identifier_or_hostname: str,
+        database: str,
+        conn: AbstractDBConnection
     ) -> None:
-        if not connection_key:
-            raise ValueError("connection_key cannot be None or empty") 
+        if not cluster_identifier_or_hostname:
+            raise ValueError("cluster_identifier_or_hostname cannot be None or empty") 
         
         if not database:
             raise ValueError("database cannot be None or empty")
         
-        try:
-            db_connection_map_lock.acquire()
-            self.map[(connection_key, database)] = conn
-        finally:
-            db_connection_map_lock.release()
+        if conn is None:
+            raise ValueError("conn cannot be None")
+        
+        with self._lock:
+            self.map[(method, cluster_identifier_or_hostname, database)] = conn
 
-    def get_keys(self) -> list[str]:
-        try:
-            db_connection_map_lock.acquire()
-            keys_copy = list(self.map.keys())
-            return keys_copy
-        finally:
-            db_connection_map_lock.release()
+    def remove(
+        self,
+        method: ConnectionMethod,
+        cluster_identifier_or_hostname: str,
+        database: str,
+    ) -> None:
+        if not cluster_identifier_or_hostname:
+            raise ValueError("cluster_identifier_or_hostname cannot be None or empty") 
+        
+        if not database:
+            raise ValueError("database cannot be None or empty")
+        
+        with self._lock:
+            try:
+                self.map.pop((method, cluster_identifier_or_hostname, database))
+            except KeyError:
+                logger.info(f"Try to remove a non-existing connection. {method} {cluster_identifier_or_hostname} {database}")
 
+    def get_keys(self) -> list[tuple[ConnectionMethod, str, str]]:
+        with self._lock:
+            return list(self.map.keys())
+
+    def close_all(self) -> None:
+        """Close all connections and clear the map."""
+        with self._lock:
+            for key, conn in self.map.items():
+                try:
+                    conn.close()
+                except Exception as e:
+                    logger.warning(f"Failed to close connection {key}: {e}")
+            self.map.clear()
