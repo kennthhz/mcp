@@ -4,14 +4,16 @@ from typing import List, Dict, Optional, Tuple
 from loguru import logger
 from botocore.exceptions import ClientError
 
-def internal_create_cluster(
+def internal_create_serverless_cluster(
     region: str,
     cluster_identifier: str,
     engine_version: str,
     database_name: str = 'postgres',
     master_username: str = 'postgres',
+    min_capacity: float = 0.5,
+    max_capacity: float = 4,
     enable_cloudwatch_logs: bool = True
-) -> tuple[str, str]:
+) -> Tuple[str, str]:
     """
     Create an Aurora PostgreSQL cluster with a single writer instance.
     Credentials are automatically managed by AWS Secrets Manager.
@@ -22,14 +24,8 @@ def internal_create_cluster(
         tags: List of tags as dictionaries with 'Key' and 'Value'
         database_name: Name of the default database
         master_username: Master username for the database
-        instance_class: DB instance class
-        db_subnet_group_name: DB subnet group name (uses default if None)
-        vpc_security_group_ids: List of VPC security group IDs
-        backup_retention_period: Number of days to retain backups
-        preferred_backup_window: Preferred backup window
-        preferred_maintenance_window: Preferred maintenance window
-        storage_encrypted: Enable storage encryption
-        kms_key_id: KMS key ID for encryption (uses default if None)
+        min_capacity: minimum ACU capacity
+        max_capacity: maximum ACU capacity
         enable_cloudwatch_logs: Enable CloudWatch logs export
         
     Returns:
@@ -66,9 +62,6 @@ def internal_create_cluster(
             'CopyTagsToSnapshot': True,
             'EnableHttpEndpoint': True,  # Enable for Data API if needed
         }
-
-        min_capacity = 0.5
-        max_capacity = 4
 
         cluster_params['ServerlessV2ScalingConfiguration'] = {
             'MinCapacity': min_capacity,
@@ -169,7 +162,7 @@ def internal_create_cluster(
 
 def internal_delete_cluster(
     region: str,
-    cluster_id: str):
+    cluster_id: str) -> None:
     
     """
     Delete an existing Amazon RDS (Aurora) cluster.
@@ -181,6 +174,10 @@ def internal_delete_cluster(
         ClientError: If deletion fails or the cluster is not found.
         ValueError: If final snapshot identifier is missing when required.
     """
+
+    CREATED_BY_TAG = 'CreatedBy'
+    CREATED_BY_VALUE = 'MCP'
+
     rds = boto3.client("rds", region_name=region)
 
     # Check cluster exists
@@ -195,17 +192,17 @@ def internal_delete_cluster(
         created_by_mcp = False
         if tags:
             for tag in tags:
-                if tag['Key'] == 'CreatedBy' and tag['Value'] == 'MCP':
+                if tag['Key'] == CREATED_BY_TAG and tag['Value'] == CREATED_BY_VALUE:
                     created_by_mcp = True
         logger.info(f"Found cluster '{cluster_id}' (status={status})")
 
         if not created_by_mcp:
             logger.error('can only delete cluster created by MCP tool')
-            raise Exception('can only delete cluster created by MCP tool')
+            raise PermissionError('You can only delete cluster created by MCP tool. cluster_id:{cluster_id}')
         
     except ClientError as e:
         if e.response["Error"]["Code"] == "DBClusterNotFoundFault":
-            print(f"Cluster '{cluster_id}' does not exist.")
+            logger.error(f"Cluster '{cluster_id}' does not exist.")
             return
         raise
 

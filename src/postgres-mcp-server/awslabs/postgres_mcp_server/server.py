@@ -21,7 +21,7 @@ import threading
 
 from awslabs.postgres_mcp_server.connection.db_connection_map import DBConnectionMap, ConnectionMethod
 from awslabs.postgres_mcp_server.connection.rds_api_connection import RDSDataAPIConnection
-from awslabs.postgres_mcp_server.connection.cp_api_connection import internal_create_cluster, internal_delete_cluster, get_rds_cluster_and_secret_arn
+from awslabs.postgres_mcp_server.connection.cp_api_connection import internal_create_serverless_cluster, internal_delete_cluster, get_rds_cluster_and_secret_arn
 from awslabs.postgres_mcp_server.connection.psycopg_pool_connection import PsycopgPoolConnection
 from awslabs.postgres_mcp_server.mutable_sql_detector import (
     check_sql_injection_risk,
@@ -235,29 +235,29 @@ def connect_to_database_via_rds_api(
     value = None
     try:
         value = db_connection_map.get(ConnectionMethod.RDS_API, cluster_identifier, database)
+
+        if value is not None:
+            logger.info(f"RDS API connection already established for database {database} in {cluster_identifier} in region {region}")
+            return f"RDS API connection already established for database {database} in {cluster_identifier} in region {region}"
+        else:
+            logger.info(f"Establishing a new RDS API connection for database {database} in {cluster_identifier} in region {region}")
+
+            cluster_arn, secret_arn = get_rds_cluster_and_secret_arn(cluster_identifier, region)
+
+            if secret_arn is None:
+                raise ValueError(f"You must have secret manager configured for Cluster {cluster_arn} to connect to database {database} via RDS API") 
+
+            db_connection = RDSDataAPIConnection(
+                    cluster_arn=cluster_arn,
+                    secret_arn=str(secret_arn),
+                    database=database,
+                    region=region,
+                    readonly=False)
+            
+            db_connection_map.set(ConnectionMethod.RDS_API, cluster_identifier, database, db_connection)
+            return f"Established a new RDS API connection for database {database} in {cluster_identifier} in region {region}"
     except Exception as e:
         logger.error(e)
-
-    if value is not None:
-        logger.info(f"RDS API connection already established for database {database} in {cluster_identifier} in region {region}")
-        return f"RDS API connection already established for database {database} in {cluster_identifier} in region {region}"
-    else:
-        logger.info(f"Establishing a new RDS API connection for database {database} in {cluster_identifier} in region {region}")
-
-        cluster_arn, secret_arn = get_rds_cluster_and_secret_arn(cluster_identifier, region)
-
-        if secret_arn is None:
-            raise ValueError(f"You must have secret manager configured for Cluster {cluster_arn} to connect to database {database} via RDS API") 
-
-        db_connection = RDSDataAPIConnection(
-                cluster_arn=cluster_arn,
-                secret_arn=str(secret_arn),
-                database=database,
-                region=region,
-                readonly=False)
-        
-        db_connection_map.set(ConnectionMethod.RDS_API, cluster_identifier, database, db_connection)
-        return f"Established a new RDS API connection for database {database} in {cluster_identifier} in region {region}"
     
 @mcp.tool(
     name='connect_to_database_via_pg_wire_protocol',
@@ -446,7 +446,7 @@ def create_cluster_worker(job_id:str, region:str, cluster_identifier:str, engine
         finally:
             async_job_status_lock.release()
 
-        cluster_arn, secret_arn = internal_create_cluster(region, cluster_identifier, engine_version, database)
+        cluster_arn, secret_arn = internal_create_serverless_cluster(region, cluster_identifier, engine_version, database)
         db_connection = RDSDataAPIConnection(
                 cluster_arn=cluster_arn,
                 secret_arn=secret_arn,
