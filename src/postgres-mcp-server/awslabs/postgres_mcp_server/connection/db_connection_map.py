@@ -17,6 +17,8 @@
 import threading
 from enum import Enum
 from loguru import logger
+from typing import List
+import json
 
 from awslabs.postgres_mcp_server.connection.abstract_db_connection import AbstractDBConnection
 
@@ -90,9 +92,18 @@ class DBConnectionMap:
             except KeyError:
                 logger.info(f"Try to remove a non-existing connection. {method} {cluster_identifier} {db_endpoint} {database}")
 
-    def get_keys(self) -> list[tuple[ConnectionMethod, str, str, str]]:
+    def get_keys_json(self) -> str:
+        entries: List[dict] = []
         with self._lock:
-            return list(self.map.keys())
+            for key in self.map.keys():
+                entry = {
+                    "connection_method" : key[0],
+                    "cluster_identifier": key[1],
+                    "db_endpoint": key[2],
+                    "database": key[3]
+                }
+                entries.append(entry)
+        return json.dumps(entries, indent=2) 
 
     def close_all(self) -> None:
         """Close all connections and clear the map."""

@@ -219,7 +219,7 @@ async def get_table_schema(
         FROM
             pg_attribute a
         WHERE
-            a.attrelid = to_regclass(:table_name)
+            a.attrelid = to_regclass(%(table_name)s)
             AND a.attnum > 0
             AND NOT a.attisdropped
         ORDER BY a.attnum
@@ -304,6 +304,19 @@ def is_database_connected(
 
     return False
 
+@mcp.tool(
+    name='get_database_connection_info',
+    description='Get all cached database connection information')
+def get_database_connection_info()->str:
+       
+    """
+        Get all cached database connection information
+        Return:
+            A list of cached connection information
+    """
+
+    global db_connection_map
+    return db_connection_map.get_keys_json()
 
 @mcp.tool(
     name='delete_express_cluster',
@@ -360,6 +373,7 @@ def create_cluster(
         result = {
             "status":"Completed",
             "cluster_identifier": cluster_identifier,
+            "db_endpoint":response['Endpoint'],
             "message":"cluster creation completed successfully"
         }
 
