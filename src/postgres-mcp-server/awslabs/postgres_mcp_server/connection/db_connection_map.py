@@ -17,7 +17,6 @@
 import threading
 from enum import Enum
 from loguru import logger
-from typing import Annotated
 
 from awslabs.postgres_mcp_server.connection.abstract_db_connection import AbstractDBConnection
 
@@ -35,57 +34,63 @@ class DBConnectionMap:
     def get(
         self,
         method: ConnectionMethod,
-        cluster_identifier_or_hostname: str,
+        cluster_identifier: str,
+        db_endpoint: str,
         database: str,
     ) -> AbstractDBConnection | None:
 
-        if not cluster_identifier_or_hostname:
-            raise ValueError("cluster_identifier_or_hostname cannot be None or empty") 
+        if not method:
+            raise ValueError("method cannot be None")
+         
+        if not cluster_identifier:
+            raise ValueError("cluster_identifier cannot be None or empty") 
         
         if not database:
             raise ValueError("database cannot be None or empty") 
         
         with self._lock:
-            return self.map.get((method, cluster_identifier_or_hostname, database))
+            return self.map.get((method, cluster_identifier, db_endpoint, database))
 
     def set(
         self,
         method: ConnectionMethod,
-        cluster_identifier_or_hostname: str,
+        cluster_identifier: str,
+        db_endpoint: str,
         database: str,
         conn: AbstractDBConnection
     ) -> None:
-        if not cluster_identifier_or_hostname:
-            raise ValueError("cluster_identifier_or_hostname cannot be None or empty") 
+        if not cluster_identifier:
+            raise ValueError("cluster_identifier cannot be None or empty") 
         
         if not database:
             raise ValueError("database cannot be None or empty")
         
-        if conn is None:
+        if not conn:
             raise ValueError("conn cannot be None")
         
         with self._lock:
-            self.map[(method, cluster_identifier_or_hostname, database)] = conn
+            self.map[(method, cluster_identifier, db_endpoint, database)] = conn
 
     def remove(
         self,
         method: ConnectionMethod,
-        cluster_identifier_or_hostname: str,
+        cluster_identifier: str,
+        db_endpoint: str,
         database: str,
     ) -> None:
-        if not cluster_identifier_or_hostname:
-            raise ValueError("cluster_identifier_or_hostname cannot be None or empty") 
+        if not cluster_identifier:
+            raise ValueError("cluster_identifier cannot be None or empty") 
         
         if not database:
             raise ValueError("database cannot be None or empty")
         
         with self._lock:
             try:
-                self.map.pop((method, cluster_identifier_or_hostname, database))
+                self.map.pop((method, cluster_identifier, db_endpoint, database))
             except KeyError:
-                logger.info(f"Try to remove a non-existing connection. {method} {cluster_identifier_or_hostname} {database}")
+                logger.info(f"Try to remove a non-existing connection. {method} {cluster_identifier} {db_endpoint} {database}")
 
-    def get_keys(self) -> list[tuple[ConnectionMethod, str, str]]:
+    def get_keys(self) -> list[tuple[ConnectionMethod, str, str, str]]:
         with self._lock:
             return list(self.map.keys())
 

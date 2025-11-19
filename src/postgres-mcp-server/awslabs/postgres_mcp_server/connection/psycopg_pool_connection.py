@@ -19,12 +19,12 @@ It supports both Aurora PostgreSQL and RDS PostgreSQL instances via direct conne
 parameters (host, port, database, user, password) or via AWS Secrets Manager.
 """
 
-import boto3
 import json
 from awslabs.postgres_mcp_server.connection.abstract_db_connection import AbstractDBConnection
 from loguru import logger
 from psycopg_pool import AsyncConnectionPool
 from typing import Any, Dict, List, Optional, Tuple
+from datetime import datetime, timedelta
 
 
 class PsycopgPoolConnection(AbstractDBConnection):
@@ -45,6 +45,8 @@ class PsycopgPoolConnection(AbstractDBConnection):
         database: str,
         readonly: bool,
         secret_arn: str,
+        db_user:str,
+        iam_auth_token:str,
         region: str,
         min_size: int = 1,
         max_size: int = 10,
@@ -63,6 +65,7 @@ class PsycopgPoolConnection(AbstractDBConnection):
             max_size: Maximum number of connections in the pool
             is_test: Whether this is a test connection
         """
+        
         super().__init__(readonly)
         self.host = host
         self.port = port
@@ -70,10 +73,20 @@ class PsycopgPoolConnection(AbstractDBConnection):
         self.min_size = min_size
         self.max_size = max_size
         self.pool: Optional['AsyncConnectionPool[Any]'] = None
+        self.created_time = datetime.now()
 
-        # Get credentials from Secrets Manager
-        logger.info(f'Retrieving credentials from Secrets Manager: {secret_arn}')
-        self.user, self.password = self._get_credentials_from_secret(secret_arn, region, is_test)
+        if db_user:
+            #if db_user is set, then it is IAM auth scenario and iam_auth_token must be set
+            if not iam_auth_token:
+                raise ValueError(f'iam_auth_token must be set when db_user is set')
+            logger.info(f'Use IAM auth for user: {db_user}')
+            self.user = db_user
+            self.password = iam_auth_token
+        else:
+            # Get credentials from Secrets Manager
+            logger.info(f'Retrieving credentials from Secrets Manager: {secret_arn}')
+            self.user, self.password = self._get_credentials_from_secret(secret_arn, region, is_test)
+
         logger.info(f'Successfully retrieved credentials for user: {self.user}')
 
         # Store connection info
@@ -90,11 +103,10 @@ class PsycopgPoolConnection(AbstractDBConnection):
             self.pool = AsyncConnectionPool(
                 self.conninfo, min_size=self.min_size, max_size=self.max_size, open=True
             )
+
+            await self.pool.open(True, 30)
             logger.info('Connection pool initialized successfully')
 
-            # Set read-only mode if needed
-            if self.readonly_query:
-                await self._set_all_connections_readonly()
 
     async def _get_connection(self):
         """Get a database connection from the pool."""
@@ -106,21 +118,8 @@ class PsycopgPoolConnection(AbstractDBConnection):
 
         return self.pool.connection(timeout=15.0)
 
-    async def _set_all_connections_readonly(self):
-        """Set all connections in the pool to read-only mode."""
-        if self.pool is None:
-            logger.warning('Connection pool is not initialized, cannot set read-only mode')
-            return
-
-        try:
-            async with self.pool.connection(timeout=15.0) as conn:
-                await conn.execute(
-                    'ALTER ROLE CURRENT_USER SET default_transaction_read_only = on'
-                )  # type: ignore
-                logger.info('Successfully set connection to read-only mode')
-        except Exception as e:
-            logger.warning(f'Failed to set connections to read-only mode: {str(e)}')
-            logger.warning('Continuing without setting read-only mode')
+    def is_expired(self)->bool:
+        return datetime.now() - self.created_time > timedelta(minutes=10)
 
     async def execute_query(
         self, sql: str, parameters: Optional[List[Dict[str, Any]]] = None
@@ -130,10 +129,32 @@ class PsycopgPoolConnection(AbstractDBConnection):
             async with await self._get_connection() as conn:
                 async with conn.transaction():
                     if self.readonly_query:
-                        await conn.execute('SET TRANSACTION READ ONLY')  # type: ignore
+                        logger.info(f"SET TRANSACTION READ ONLY")
+                        await conn.execute('SET TRANSACTION READ ONLY')
 
                     # Create a cursor for better control
                     async with conn.cursor() as cursor:
+
+                        await cursor.execute("SHOW transaction_read_only")
+                        readonly = await cursor.fetchone()
+                        logger.info(f"transaction_read_only: {readonly[0]}")
+                        
+                        # Check default transaction readonly
+                        await cursor.execute("SHOW default_transaction_read_only")
+                        default_readonly = await cursor.fetchone()
+                        logger.info(f"default_transaction_read_only: {default_readonly[0]}")
+                        
+                        # Check if database is in recovery (replica)
+                        await cursor.execute("SELECT pg_is_in_recovery()")
+                        in_recovery = await cursor.fetchone()
+                        logger.info(f"Database in recovery mode: {in_recovery[0]}")
+                        
+                        # Check current user
+                        await cursor.execute("SELECT current_user, session_user")
+                        user_info = await cursor.fetchone()
+                        logger.info(f"Current user: {user_info[0]}, Session user: {user_info[1]}")
+
+
                         # Execute the query
                         if parameters:
                             params = self._convert_parameters(parameters)

@@ -50,6 +50,9 @@ class RDSDataAPIConnection(AbstractDBConnection):
         if not is_test:
             self.data_client = boto3.client('rds-data', region_name=region)
 
+    def is_expired(self)->bool:
+        return True
+    
     async def execute_query(
         self, sql: str, parameters: Optional[List[Dict[str, Any]]] = None
     ) -> Dict[str, Any]:
