@@ -24,7 +24,7 @@ import boto3
 
 from awslabs.postgres_mcp_server.connection.db_connection_map import DBConnectionMap, ConnectionMethod
 from awslabs.postgres_mcp_server.connection.rds_api_connection import RDSDataAPIConnection
-from awslabs.postgres_mcp_server.connection.cp_api_connection import internal_get_cluster_properties, internal_create_serverless_cluster, internal_create_express_cluster, internal_delete_cluster, get_rds_cluster_and_secret_arn, internal_delete_express_cluster
+from awslabs.postgres_mcp_server.connection.cp_api_connection import internal_get_cluster_properties, internal_create_serverless_cluster, internal_create_express_cluster, get_rds_cluster_and_secret_arn
 from awslabs.postgres_mcp_server.connection.psycopg_pool_connection import PsycopgPoolConnection
 from awslabs.postgres_mcp_server.connection.abstract_db_connection import AbstractDBConnection
 from awslabs.postgres_mcp_server.mutable_sql_detector import (
@@ -318,18 +318,6 @@ def get_database_connection_info()->str:
     global db_connection_map
     return db_connection_map.get_keys_json()
 
-@mcp.tool(
-    name='delete_express_cluster',
-    description='Delete an express Aurora Postgres cluster')
-def delete_express_cluster(
-    cluster_identifier: Annotated[str, Field(description='cluster identifier')]) -> None:
-
-    """Delete an express Aurora Postgres cluster
-    Args:
-        cluster_identifier: cluster identifier
-    """
-
-    internal_delete_express_cluster(cluster_identifier)
 
 @mcp.tool(
     name='create_cluster',
@@ -410,54 +398,6 @@ def create_cluster(
 
     return json.dumps(result, indent=2)
 
-@mcp.tool(
-    name='delete_cluster',
-    description='Delete an RDS/Aurora cluster')
-def delete_cluster(
-    region: Annotated[str, Field(description='region')],
-    cluster_identifier: Annotated[str, Field(description='cluster identifier')],
-    with_express_configuration: Annotated[bool, Field(description='with express configuration')] = False)-> str:
-
-    """Start a background job to delete a RDS or Aurora Postgres cluster and its instances
-
-    Args:
-        region: region
-        cluster_identifier: cluster identifier
-        with_express_configuration: the cluster is associated with express configuration
-
-    Returns:
-         result
-    """
-    global async_job_status
-    global async_job_status_lock
-
-    job_id = f"delete-cluster-{cluster_identifier}-{datetime.now().isoformat(timespec='milliseconds')}"
-
-    try:
-        async_job_status_lock.acquire()
-        async_job_status[job_id] = {"state":"pending", "result":None}
-    finally:
-        async_job_status_lock.release()
-
-    t = threading.Thread(
-        target=delete_cluster_worker,
-        args=(job_id, region, cluster_identifier, with_express_configuration),
-        daemon=False,
-    )
-    t.start()
-
-    logger.info(f"start_delete_cluster_job return with job_id:{job_id}"
-                f"region:{region} cluster_identifier:{cluster_identifier}, with_express_configuration:{with_express_configuration}")
-    result = {
-            "status": "Pending",
-            "message": "cluster deletion started",
-            "job_id": job_id,
-            "check_status_tool": "get_job_status",
-            "next_action": f"Use get_job_status(job_id='{job_id}') to get results"
-    }
-
-    return json.dumps(result, indent=2)
-
 
 @mcp.tool(
     name='get_job_status',
@@ -519,21 +459,6 @@ def create_cluster_worker(
         finally:
             async_job_status_lock.release()
 
-def delete_cluster_worker(job_id:str, region:str, cluster_identifier:str):
-    try:
-        internal_delete_cluster(region, cluster_identifier)
-        try:
-            async_job_status_lock.acquire()
-            async_job_status[job_id]["state"] = "succeeded"
-        finally:
-            async_job_status_lock.release()
-    except Exception as e:
-        try:
-            async_job_status_lock.acquire()
-            async_job_status[job_id]["state"] = "failed"
-            async_job_status[job_id]["result"] = str(e)
-        finally:
-            async_job_status_lock.release()
 
 def internal_connect_to_database(
     region: Annotated[str, Field(description='region')],

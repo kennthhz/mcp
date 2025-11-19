@@ -6,16 +6,19 @@ from typing import List, Dict, Optional, Tuple
 from loguru import logger
 from botocore.exceptions import ClientError
 
-def internal_get_cluster_properties(cluster_identifier: str, region: str, 
-        with_express_configuration: bool = False) -> Dict:
-    
-    rds_client = None
+def internal_create_rds_client(region:str, with_express_configuration:bool):
     if with_express_configuration:
         region = 'us-east-2'
         endpoint_url = f'https://rds-preview.{region}.amazonaws.com'
-        rds_client = boto3.client('rds', region_name=region, endpoint_url=endpoint_url)
+        return boto3.client('rds', region_name=region, endpoint_url=endpoint_url)
     else:
-        rds_client = boto3.client('rds', region_name=region)        
+        return boto3.client('rds', region_name=region)
+
+
+def internal_get_cluster_properties(cluster_identifier: str, region: str, 
+        with_express_configuration: bool = False) -> Dict:
+    
+    rds_client = internal_create_rds_client(region, with_express_configuration)
 
     response = rds_client.describe_db_clusters(DBClusterIdentifier=cluster_identifier)
     cluster_properties= response['DBClusters'][0]
@@ -28,55 +31,9 @@ def internal_get_cluster_properties(cluster_identifier: str, region: str,
     return cluster_properties
 
 
-def internal_delete_express_cluster(cluster_identifier: str) -> None:
-
-    region = 'us-east-2'
-    endpoint_url = f'https://rds-preview.{region}.amazonaws.com'
-    rds_client = boto3.client('rds', region_name=region, endpoint_url=endpoint_url)
-
-    CREATED_BY_TAG = 'CreatedBy'
-    CREATED_BY_VALUE = 'MCP'
-
-    logger.info(f'Entered internal_delete_express_cluster with cluster_identifier:{cluster_identifier}')
-
-    try:
-        resp = rds_client.describe_db_clusters(DBClusterIdentifier=cluster_identifier)
-        cluster = resp["DBClusters"][0]
-        status = resp["DBClusters"][0]["Status"]
-        arn = cluster["DBClusterArn"]
-
-        tag_resp = rds_client.list_tags_for_resource(ResourceName=arn)
-        tags = tag_resp.get("TagList", [])
-        created_by_mcp = False
-        if tags:
-            for tag in tags:
-                if tag['Key'] == CREATED_BY_TAG and tag['Value'] == CREATED_BY_VALUE:
-                    created_by_mcp = True
-        logger.info(f"Found express cluster '{cluster_identifier}' (status={status})")
-
-        if not created_by_mcp:
-            logger.error('can only delete cluster created by MCP tool')
-            raise PermissionError('You can only delete cluster created by MCP tool. cluster_id:{cluster_id}')
-        
-
-        params = {
-            "DBClusterIdentifier": cluster_identifier,
-            "SkipFinalSnapshot": True,
-        }
-
-        rds_client.delete_db_cluster(**params)
-    except Exception as e:
-        logger.error(f"Error deleting express cluster '{cluster_identifier}': {e}")
-        raise
-
-    logger.info(f"Express cluster {cluster_identifier} deleted")
-
-
 def internal_create_express_cluster(cluster_identifier: str) -> Dict:
 
-    region = 'us-east-2'
-    endpoint_url = f'https://rds-preview.{region}.amazonaws.com'
-    rds_client = boto3.client('rds', region_name=region, endpoint_url=endpoint_url)
+    rds_client = internal_create_rds_client(region='us-east-2', with_express_configuration=True) 
 
     # Add default tags
     tags = []
@@ -119,6 +76,7 @@ def internal_create_express_cluster(cluster_identifier: str) -> Dict:
         logger.error(f"Trace:{trace_msg}")
         raise
 
+
 def internal_create_serverless_cluster(
     region: str,
     cluster_identifier: str,
@@ -148,7 +106,8 @@ def internal_create_serverless_cluster(
         Dictionary containing cluster information and secret ARN
     """
 
-    rds_client = boto3.client('rds', region_name=region)
+    rds_client = internal_create_rds_client(region=region, with_express_configuration=False)
+
     
     # Add default tags
     tags = []
@@ -258,130 +217,11 @@ def internal_create_serverless_cluster(
         logger.error(f"Trace:{trace_msg}")
         raise
 
-def internal_delete_cluster(
-    region: str,
-    cluster_id: str) -> None:
-    
-    """
-    Delete an existing Amazon RDS (Aurora) cluster.
-
-    Args:
-        cluster_id: The DB cluster identifier.
-
-    Raises:
-        ClientError: If deletion fails or the cluster is not found.
-        ValueError: If final snapshot identifier is missing when required.
-    """
-
-    CREATED_BY_TAG = 'CreatedBy'
-    CREATED_BY_VALUE = 'MCP'
-
-    rds = boto3.client("rds", region_name=region)
-
-    # Check cluster exists
-    try:
-        resp = rds.describe_db_clusters(DBClusterIdentifier=cluster_id)
-        cluster = resp["DBClusters"][0]
-        status = resp["DBClusters"][0]["Status"]
-        arn = cluster["DBClusterArn"]
-
-        tag_resp = rds.list_tags_for_resource(ResourceName=arn)
-        tags = tag_resp.get("TagList", [])
-        created_by_mcp = False
-        if tags:
-            for tag in tags:
-                if tag['Key'] == CREATED_BY_TAG and tag['Value'] == CREATED_BY_VALUE:
-                    created_by_mcp = True
-        logger.info(f"Found cluster '{cluster_id}' (status={status})")
-
-        if not created_by_mcp:
-            logger.error('can only delete cluster created by MCP tool')
-            raise PermissionError('You can only delete cluster created by MCP tool. cluster_id:{cluster_id}')
-        
-    except ClientError as e:
-        if e.response["Error"]["Code"] == "DBClusterNotFoundFault":
-            logger.error(f"Cluster '{cluster_id}' does not exist.")
-            return
-        raise
-
-    # Delete all DB instances in the cluster ---
-    # Aurora clusters list members in DBClusterMembers
-    members = cluster.get("DBClusterMembers", [])
-    instance_ids = [m["DBInstanceIdentifier"] for m in members]
-
-    if instance_ids:
-        logger.info("Deleting %d instance(s): %s", len(instance_ids), ", ".join(instance_ids))
-
-    for inst_id in instance_ids:
-        try:
-            rds.delete_db_instance(
-                DBInstanceIdentifier=inst_id,
-                SkipFinalSnapshot=True,            # change to False + FinalDBSnapshotIdentifier if you require snapshots
-                DeleteAutomatedBackups=True
-            )
-            logger.info("Deletion of instance '%s' initiated.", inst_id)
-        except ClientError as e:
-            # If instance already gone, continue; otherwise re-raise
-            code = e.response["Error"]["Code"]
-            if code in ("DBInstanceNotFound", "DBInstanceNotFoundFault"):
-                logger.info("Instance '%s' already deleted.", inst_id)
-            else:
-                logger.error("Error deleting instance '%s': %s", inst_id, e)
-                raise
-
-    # Wait for all instances to be fully deleted ---
-    if instance_ids:
-        logger.info("Waiting for instances to be deleted...")
-    remaining = set(instance_ids)
-
-    while remaining:
-        done = []
-        for inst_id in list(remaining):
-            try:
-                rds.describe_db_instances(DBInstanceIdentifier=inst_id)
-                # still exists
-            except ClientError as e:
-                if e.response["Error"]["Code"] in ("DBInstanceNotFound", "DBInstanceNotFoundFault"):
-                    logger.info("Instance '%s' deleted.", inst_id)
-                    done.append(inst_id)
-                else:
-                    raise
-        for d in done:
-            remaining.discard(d)
-        if remaining:
-            time.sleep(5)
-
-    # Delete cluster
-    try:
-        params = {
-            "DBClusterIdentifier": cluster_id,
-            "SkipFinalSnapshot": True,
-        }
-
-        rds.delete_db_cluster(**params)
-        logger.info(f"Deletion of cluster '{cluster_id}' initiated.")
-    except ClientError as e:
-        logger.error(f"Error deleting cluster '{cluster_id}': {e}")
-        raise
-
-    # Poll for deletion
-
-    logger.info("Waiting for cluster to be deleted...")
-    while True:
-        try:
-            rds.describe_db_clusters(DBClusterIdentifier=cluster_id)
-            time.sleep(5)
-        except ClientError as e:
-            if e.response["Error"]["Code"] == "DBClusterNotFoundFault":
-                logger.info("\nCluster deleted successfully.")
-                break
-            else:
-                raise
 
 def get_rds_cluster_and_secret_arn(cluster_id: str, region: str) -> Tuple[str, Optional[str]]:
     """Return the Cluster ARN and the associated Secrets Manager ARN (if any)."""
-    rds = boto3.client("rds", region_name=region)
-    resp = rds.describe_db_clusters(DBClusterIdentifier=cluster_id)
+    rds_client = internal_create_rds_client(region=region, with_express_configuration=False)
+    resp = rds_client.describe_db_clusters(DBClusterIdentifier=cluster_id)
 
     if not resp["DBClusters"]:
         raise ValueError(f"No cluster found for identifier: {cluster_id}")
