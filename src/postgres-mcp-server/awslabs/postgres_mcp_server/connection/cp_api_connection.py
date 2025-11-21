@@ -2,7 +2,7 @@ import boto3
 import time
 import traceback
 import json
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional, Tuple, Any
 from loguru import logger
 from botocore.exceptions import ClientError
 
@@ -15,23 +15,94 @@ def internal_create_rds_client(region:str, with_express_configuration:bool):
         return boto3.client('rds', region_name=region)
 
 
-def internal_get_cluster_properties(cluster_identifier: str, region: str, 
-        with_express_configuration: bool = False) -> Dict:
+def internal_get_cluster_properties(
+    cluster_identifier: str,
+    region: str,
+    with_express_configuration: bool = False
+) -> Dict[str, Any]:
+    """
+    Retrieve RDS cluster properties from AWS.
     
-    rds_client = internal_create_rds_client(region, with_express_configuration)
-
-    response = rds_client.describe_db_clusters(DBClusterIdentifier=cluster_identifier)
-    cluster_properties= response['DBClusters'][0]
+    Args:
+        cluster_identifier: RDS cluster identifier
+        region: AWS region (e.g., 'us-east-1')
+        with_express_configuration: Use express RDS client config (default: False)
     
-    logger.info(
-        f"Cluster properties for {cluster_identifier}:\n"
-        f"{json.dumps(cluster_properties, indent=2, default=str)}"
-    )
+    Returns:
+        Dict[str, Any]: Cluster properties from AWS RDS API
     
-    return cluster_properties
+    Raises:
+        ValueError: If cluster_identifier or region is empty
+        ClientError: If AWS API call fails (cluster not found, access denied, etc.)
+        NoCredentialsError: If AWS credentials not configured
+    
+    Example:
+        >>> props = internal_get_cluster_properties('my-cluster', 'us-east-1')
+        >>> print(props['Status'])
+    """
+    # Input validation
+    if not cluster_identifier or not region:
+        raise ValueError("cluster_identifier and region are required")
+    
+    logger.info(f"Fetching properties for cluster '{cluster_identifier}' in '{region}' "
+                f"with_express_configuration:{with_express_configuration}")
+    
+    try:
+        rds_client = internal_create_rds_client(region, with_express_configuration)
+        response = rds_client.describe_db_clusters(
+            DBClusterIdentifier=cluster_identifier
+        )
+        
+        # Safely extract cluster properties
+        clusters = response.get('DBClusters', [])
+        if not clusters:
+            raise ValueError(
+                f"Cluster '{cluster_identifier}' not found in region '{region}'"
+            )
+        
+        cluster_properties = clusters[0]
+        
+        # Log summary only
+        logger.info(
+            f"Retrieved cluster '{cluster_identifier}': "
+            f"Status={cluster_properties.get('Status')}, "
+            f"Engine={cluster_properties.get('Engine')}"
+        )
+        
+        # Full properties at debug level
+        logger.debug(
+            f"Cluster properties: {json.dumps(cluster_properties, indent=2, default=str)}"
+        )
+        
+        return cluster_properties
+        
+    except ClientError as e:
+        error_code = e.response['Error']['Code']
+        logger.error(
+            f"AWS error fetching cluster '{cluster_identifier}': "
+            f"{error_code} - {e.response['Error']['Message']}"
+        )
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching cluster properties: {type(e).__name__}: {e}")
+        raise
 
 
-def internal_create_express_cluster(cluster_identifier: str) -> Dict:
+def internal_create_express_cluster(cluster_identifier: str) -> Dict[str, Any]:
+
+    """
+    Create an Aurora PostgreSQL Express cluster.
+    
+    Args:
+        cluster_identifier: Unique name for the cluster
+    
+    Returns:
+        Dict[str, Any]: Cluster properties
+    
+    Raises:
+        ValueError: If cluster_identifier is invalid
+        ClientError: If AWS API call fails
+    """
 
     rds_client = internal_create_rds_client(region='us-east-2', with_express_configuration=True) 
 
@@ -39,7 +110,7 @@ def internal_create_express_cluster(cluster_identifier: str) -> Dict:
     tags = []
     tags.append({'Key': 'CreatedBy', 'Value': 'MCP'})
 
-    logger.info(f'Entered internal_create_express_cluster with cluster_identifier:{cluster_identifier}')
+    logger.info(f'Create express clsuter with cluster_identifier:{cluster_identifier}')
 
     try:
         cluster_create_start_time = time.time()
@@ -49,7 +120,6 @@ def internal_create_express_cluster(cluster_identifier: str) -> Dict:
             Tags=tags,
             WithExpressConfiguration=True)
 
-        # Get the final cluster details including the secret ARN
         result = rds_client.describe_db_clusters(
             DBClusterIdentifier=cluster_identifier
         )['DBClusters'][0]
@@ -66,14 +136,17 @@ def internal_create_express_cluster(cluster_identifier: str) -> Dict:
         
         cluster_create_stop_time = time.time()
         elapsed_time = cluster_create_stop_time - cluster_create_start_time
-        logger.info(f"Express Cluster {cluster_identifier} created successfully")
-        logger.info(f"Express Cluster creation {cluster_identifier} took {elapsed_time:.2f} seconds")
+        logger.info(f"Express Cluster {cluster_identifier} created successfully and took {elapsed_time:.2f} seconds")
         return result
     
+    except ClientError as e:
+        logger.error(
+            f"AWS error creating express cluster '{cluster_identifier}': "
+            f"{e.response['Error']['Code']} - {e.response['Error']['Message']}"
+        )
+        raise
     except Exception as e:
-        logger.error(f"internal_create_express_cluster failed with error: {str(e)}")
-        trace_msg = traceback.format_exc()
-        logger.error(f"Trace:{trace_msg}")
+        logger.error(f"Error creating cluster '{cluster_identifier}': {type(e).__name__}: {e}")
         raise
 
 
@@ -86,7 +159,7 @@ def internal_create_serverless_cluster(
     min_capacity: float = 0.5,
     max_capacity: float = 4,
     enable_cloudwatch_logs: bool = True
-) -> Dict:
+) -> Dict[str, Any]:
     """
     Create an Aurora PostgreSQL cluster with a single writer instance.
     Credentials are automatically managed by AWS Secrets Manager.
@@ -95,7 +168,6 @@ def internal_create_serverless_cluster(
         region: region of the cluster
         cluster_identifier: Name of the Aurora cluster
         engine_version: PostgreSQL engine version (e.g., '15.3', '14.7')
-        with_express_configuration: Create the cluster with express configuration
         database_name: Name of the default database
         master_username: Master username for the database
         min_capacity: minimum ACU capacity
@@ -106,6 +178,15 @@ def internal_create_serverless_cluster(
         Dictionary containing cluster information and secret ARN
     """
 
+    if not region:
+        raise ValueError('region is required')
+    if not cluster_identifier:
+        raise ValueError('cluster_identifier is required')
+    if not engine_version:
+        raise ValueError('engine_version is required')
+    if not database_name:
+        raise ValueError('database_name is required')
+    
     rds_client = internal_create_rds_client(region=region, with_express_configuration=False)
 
     
@@ -120,7 +201,9 @@ def internal_create_serverless_cluster(
     
     try:
         # Create the Aurora cluster
-        logger.info(f"Creating Aurora PostgreSQL cluster: {cluster_identifier}")
+        logger.info(f"Creating Aurora PostgreSQL cluster:{cluster_identifier} "
+                    f"region:{region} engine_version:{engine_version} database_name:{database_name} "
+                    f"master_username:{master_username}")
         
         cluster_params = {
             'DBClusterIdentifier': cluster_identifier,
@@ -133,6 +216,7 @@ def internal_create_serverless_cluster(
             'DeletionProtection': False,  # Set to True for production
             'CopyTagsToSnapshot': True,
             'EnableHttpEndpoint': True,  # Enable for Data API if needed
+            'EnableCloudwatchLogsExports': enable_cloudwatch_logs_exports
         }
 
         cluster_params['ServerlessV2ScalingConfiguration'] = {
@@ -153,10 +237,11 @@ def internal_create_serverless_cluster(
         waiter.wait(
             DBClusterIdentifier=cluster_identifier,
             WaiterConfig={
-                'Delay': 1,
-                'MaxAttempts': 1800
+                'Delay': 5,
+                'MaxAttempts': 120
             }
         )
+
         logger.info(f"Cluster {cluster_identifier} is now available")
         cluster_create_stop_time = time.time()
         elapsed_time = cluster_create_stop_time - cluster_create_start_time
@@ -191,6 +276,7 @@ def internal_create_serverless_cluster(
                 'MaxAttempts': 1800 # Try up to 1800 time = 30 mins
             }
         )
+
         logger.info(f"Instance {instance_identifier} is now available")
         instance_create_stop_time = time.time()
         elapsed_time = instance_create_stop_time - instance_create_start_time
@@ -200,56 +286,33 @@ def internal_create_serverless_cluster(
         final_cluster = rds_client.describe_db_clusters(
             DBClusterIdentifier=cluster_identifier
         )['DBClusters'][0]
-
-        resource_id = final_cluster['DbClusterResourceId']
-        setup_aurora_iam_policy_for_current_user(db_user=master_username, cluster_resource_id=resource_id, cluster_region=region)
           
         return final_cluster
         
     except ClientError as e:
-        error_code = e.response['Error']['Code']
-        error_message = e.response['Error']['Message']
-        logger.error(f"Error creating Aurora cluster: {error_code} - {error_message}")
+        logger.error(
+            f"AWS error creating serverless cluster '{cluster_identifier}': "
+            f"{e.response['Error']['Code']} - {e.response['Error']['Message']}"
+        )
         raise
     except Exception as e:
-        logger.error(f"Unexpected error: {str(e)}")
-        trace_msg = traceback.format_exc()
-        logger.error(f"Trace:{trace_msg}")
+        logger.error(f"Error creating serverless cluster '{cluster_identifier}': {type(e).__name__}: {e}")
         raise
 
-
-def get_rds_cluster_and_secret_arn(cluster_id: str, region: str) -> Tuple[str, Optional[str]]:
-    """Return the Cluster ARN and the associated Secrets Manager ARN (if any)."""
-    rds_client = internal_create_rds_client(region=region, with_express_configuration=False)
-    resp = rds_client.describe_db_clusters(DBClusterIdentifier=cluster_id)
-
-    if not resp["DBClusters"]:
-        raise ValueError(f"No cluster found for identifier: {cluster_id}")
-
-    cluster = resp["DBClusters"][0]
-
-    # Cluster ARN
-    cluster_arn = cluster["DBClusterArn"]
-
-    # Secret ARN (if cluster is managed with Secrets Manager)
-    secret_arn = None
-    if "MasterUserSecret" in cluster and cluster["MasterUserSecret"]:
-        secret_arn = cluster["MasterUserSecret"].get("SecretArn")
-
-    return cluster_arn, secret_arn
 
 def setup_aurora_iam_policy_for_current_user(
     db_user: str,
     cluster_resource_id: str,
-    cluster_region
+    cluster_region: str
 ) -> Optional[str]:
     """
-    Create IAM policy for Aurora access and attach it to the current IAM user.
+    Create or update IAM policy for Aurora access.
+    Maintains one policy per user, adding new clusters as they're created.
     
     Args:
         db_user: PostgreSQL username (must have rds_iam role granted in database)
         cluster_resource_id: The DBI resource ID (e.g., 'cluster-ABCD123XYZ')
-        region: AWS region where the Aurora cluster is located
+        cluster_region: AWS region where the Aurora cluster is located
     
     Returns:
         Policy ARN if successful, None otherwise
@@ -262,6 +325,10 @@ def setup_aurora_iam_policy_for_current_user(
     # Validate inputs
     if not db_user or not isinstance(db_user, str):
         raise ValueError("db_user must be a non-empty string")
+    if not cluster_resource_id or not isinstance(cluster_resource_id, str):
+        raise ValueError("cluster_resource_id must be a non-empty string")
+    if not cluster_region or not isinstance(cluster_region, str):
+        raise ValueError("cluster_region must be a non-empty string")
     
     # Initialize clients
     sts = boto3.client('sts')
@@ -323,69 +390,133 @@ def setup_aurora_iam_policy_for_current_user(
     else:
         raise ValueError(f"Unexpected ARN format: {arn}")
     
-    # 3. Create IAM policy document
+    # 3. Prepare new resource ARN
+    # Policy name is per user only (not per region or cluster)
     policy_name = f'AuroraIAMAuth-{db_user}'
-    resource_arn = f"arn:aws:rds-db:{cluster_region}:{account_id}:dbuser:{cluster_resource_id}/{db_user}"
-    
-    policy_document = {
-        "Version": "2012-10-17",
-        "Statement": [
-            {
-                "Effect": "Allow",
-                "Action": "rds-db:connect",
-                "Resource": resource_arn
-            }
-        ]
-    }
-    
-    logger.info(f"\nPolicy Details:")
-    logger.info(f"  Name: {policy_name}")
-    logger.info(f"  Resource: {resource_arn}")
-    
-    # 4. Create or get existing policy
     policy_arn = f"arn:aws:iam::{account_id}:policy/{policy_name}"
     
+    new_resource_arn = f"arn:aws:rds-db:{cluster_region}:{account_id}:dbuser:{cluster_resource_id}/{db_user}"
+    
+    logger.info(f"\nPolicy Configuration:")
+    logger.info(f"  Policy Name: {policy_name}")
+    logger.info(f"  New Resource: {new_resource_arn}")
+    logger.info(f"  Cluster Region: {cluster_region}")
+    logger.info(f"  Cluster Resource ID: {cluster_resource_id}")
+    
+    # 4. Create or update policy
+    policy_created = False
+    
     try:
-        # Check if policy exists
+        # Try to get existing policy
         existing_policy = iam.get_policy(PolicyArn=policy_arn)
-        logger.info(f"\n✓ Policy already exists")
+        logger.info(f"\n✓ Policy already exists: {policy_name}")
         
-        # Optional: Check if policy document matches
+        # Get current policy document
         policy_version = iam.get_policy_version(
             PolicyArn=policy_arn,
             VersionId=existing_policy['Policy']['DefaultVersionId']
         )
-        existing_doc = policy_version['PolicyVersion']['Document']
         
-        if existing_doc != policy_document:
-            logger.info(f"⚠️  Warning: Existing policy document differs from expected")
+        current_doc = policy_version['PolicyVersion']['Document']
+        current_resources = current_doc['Statement'][0]['Resource']
+        
+        # Normalize to list (could be string or list)
+        if isinstance(current_resources, str):
+            current_resources = [current_resources]
+        
+        logger.info(f"  Current resources in policy: {len(current_resources)}")
+        for idx, res in enumerate(current_resources, 1):
+            logger.info(f"    {idx}. {res}")
+        
+        # Check if new resource already exists
+        if new_resource_arn in current_resources:
+            logger.info(f"\n✓ Cluster already included in policy - no update needed")
+        else:
+            # Add new resource to the list
+            current_resources.append(new_resource_arn)
+            logger.info(f"\n→ Adding new cluster to policy...")
+            
+            # Create updated policy document
+            updated_doc = {
+                "Version": "2012-10-17",
+                "Statement": [
+                    {
+                        "Effect": "Allow",
+                        "Action": "rds-db:connect",
+                        "Resource": current_resources
+                    }
+                ]
+            }
+            
+            # Handle AWS policy version limits (max 5 versions per policy)
+            versions = iam.list_policy_versions(PolicyArn=policy_arn)['Versions']
+            logger.info(f"  Current policy versions: {len(versions)}/5")
+            
+            if len(versions) >= 5:
+                # Find oldest non-default version to delete
+                non_default_versions = [v for v in versions if not v['IsDefaultVersion']]
+                if non_default_versions:
+                    oldest_version = sorted(non_default_versions, key=lambda v: v['CreateDate'])[0]
+                    logger.info(f"  Deleting oldest version: {oldest_version['VersionId']} (created {oldest_version['CreateDate']})")
+                    iam.delete_policy_version(
+                        PolicyArn=policy_arn,
+                        VersionId=oldest_version['VersionId']
+                    )
+            
+            # Create new policy version
+            new_version = iam.create_policy_version(
+                PolicyArn=policy_arn,
+                PolicyDocument=json.dumps(updated_doc, indent=2),
+                SetAsDefault=True
+            )
+            
+            logger.info(f"✓ Successfully updated policy")
+            logger.info(f"  New version: {new_version['PolicyVersion']['VersionId']}")
+            logger.info(f"  Total resources now: {len(current_resources)}")
             
     except iam.exceptions.NoSuchEntityException:
-        # Create new policy
+        # Policy doesn't exist - create new one
+        logger.info(f"\nPolicy doesn't exist, creating new policy...")
+        
+        policy_document = {
+            "Version": "2012-10-17",
+            "Statement": [
+                {
+                    "Effect": "Allow",
+                    "Action": "rds-db:connect",
+                    "Resource": [new_resource_arn]  # Start with single resource in array
+                }
+            ]
+        }
+        
         try:
             policy_response = iam.create_policy(
                 PolicyName=policy_name,
                 PolicyDocument=json.dumps(policy_document, indent=2),
-                Description=f'Allow IAM authentication to Aurora PostgreSQL as user {db_user}'
+                Description=f'IAM authentication for Aurora PostgreSQL user {db_user} across all clusters'
             )
             policy_arn = policy_response['Policy']['Arn']
-            logger.info(f"\n✓ Created new policy: {policy_name}")
+            policy_created = True
+            logger.info(f"✓ Successfully created new policy: {policy_name}")
+            logger.info(f"  Policy ARN: {policy_arn}")
             
         except iam.exceptions.EntityAlreadyExistsException:
-            # Race condition: policy was created between check and create
-            logger.info(f"\n✓ Policy was just created: {policy_name}")
+            # Race condition: policy was created between our check and create
+            logger.info(f"✓ Policy was just created by another process")
             
         except Exception as e:
             logger.error(f"\n❌ Error creating policy: {e}")
             raise
     
     except Exception as e:
-        logger.error(f"\n❌ Error checking policy: {e}")
+        logger.error(f"\n❌ Error checking/updating policy: {e}")
+        trace_msg = traceback.format_exc()
+        logger.error(f"Traceback: {trace_msg}")
         raise
     
-    # 5. Attach policy to current user
+    # 5. Attach policy to current user (if not already attached)
     try:
-        # Check if already attached
+        # Check if policy is already attached
         attached_policies = iam.list_attached_user_policies(UserName=current_user)
         already_attached = any(
             p['PolicyArn'] == policy_arn 
@@ -401,8 +532,8 @@ def setup_aurora_iam_policy_for_current_user(
             )
             logger.info(f"\n✓ Successfully attached policy to user: {current_user}")
         
-        # Display all attached policies
-        logger.info(f"\nAll attached policies for {current_user}:")
+        # Display summary of all attached policies
+        logger.info(f"\nAttached policies for user {current_user}:")
         attached_policies = iam.list_attached_user_policies(UserName=current_user)
         for policy in attached_policies['AttachedPolicies']:
             marker = "  → " if policy['PolicyArn'] == policy_arn else "    "
@@ -416,9 +547,12 @@ def setup_aurora_iam_policy_for_current_user(
         
     except iam.exceptions.LimitExceededException:
         logger.error(f"\n❌ Error: Managed policy limit exceeded for user '{current_user}'")
+        logger.error("Maximum 10 managed policies can be attached to a user")
         logger.error("Consider using inline policies or consolidating existing policies")
         raise
         
     except Exception as e:
         logger.error(f"\n❌ Error attaching policy to user: {e}")
+        trace_msg = traceback.format_exc()
+        logger.error(f"Traceback: {trace_msg}")
         raise

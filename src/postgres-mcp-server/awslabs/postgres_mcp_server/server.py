@@ -24,7 +24,7 @@ import boto3
 
 from awslabs.postgres_mcp_server.connection.db_connection_map import DBConnectionMap, ConnectionMethod
 from awslabs.postgres_mcp_server.connection.rds_api_connection import RDSDataAPIConnection
-from awslabs.postgres_mcp_server.connection.cp_api_connection import internal_get_cluster_properties, internal_create_serverless_cluster, internal_create_express_cluster, get_rds_cluster_and_secret_arn
+from awslabs.postgres_mcp_server.connection.cp_api_connection import internal_get_cluster_properties, internal_create_serverless_cluster, internal_create_express_cluster, setup_aurora_iam_policy_for_current_user
 from awslabs.postgres_mcp_server.connection.psycopg_pool_connection import PsycopgPoolConnection
 from awslabs.postgres_mcp_server.connection.abstract_db_connection import AbstractDBConnection
 from awslabs.postgres_mcp_server.mutable_sql_detector import (
@@ -350,6 +350,12 @@ def create_cluster(
 
     if with_express_configuration:
         response = internal_create_express_cluster(cluster_identifier)
+
+        setup_aurora_iam_policy_for_current_user(
+            db_user=response['MasterUsername'],
+            cluster_resource_id=response['DbClusterResourceId'], 
+            cluster_region=region)
+        
         internal_connect_to_database(
             region = region,
             cluster_identifier=cluster_identifier,
@@ -437,6 +443,11 @@ def create_cluster_worker(
             cluster_identifier = cluster_identifier,
             engine_version = engine_version,
             database_name = database)
+        
+        setup_aurora_iam_policy_for_current_user(
+            db_user=cluster_result['MasterUsername'],
+            cluster_resource_id=cluster_result['DbClusterResourceId'], 
+            cluster_region=region)
         
         internal_connect_to_database(
             region = region,
