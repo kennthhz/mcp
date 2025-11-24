@@ -300,6 +300,14 @@ def internal_create_serverless_cluster(
         raise
 
 
+import boto3
+import json
+import traceback
+from typing import Optional
+import logging
+
+logger = logging.getLogger(__name__)
+
 def setup_aurora_iam_policy_for_current_user(
     db_user: str,
     cluster_resource_id: str,
@@ -308,6 +316,9 @@ def setup_aurora_iam_policy_for_current_user(
     """
     Create or update IAM policy for Aurora access.
     Maintains one policy per user, adding new clusters as they're created.
+    
+    ⚠️  If running as assumed role, this will attempt to attach the policy to 
+        the BASE ROLE (not the session). This requires iam:AttachRolePolicy permission.
     
     Args:
         db_user: PostgreSQL username (must have rds_iam role granted in database)
@@ -318,8 +329,8 @@ def setup_aurora_iam_policy_for_current_user(
         Policy ARN if successful, None otherwise
     
     Raises:
-        ValueError: If running as assumed role or invalid identity
-        boto3 exceptions: For AWS API errors
+        ValueError: If running as federated user, root, or invalid identity
+        boto3 exceptions: For AWS API errors (except AccessDenied on attach)
     """
     
     # Validate inputs
@@ -334,7 +345,7 @@ def setup_aurora_iam_policy_for_current_user(
     sts = boto3.client('sts')
     iam = boto3.client('iam')
     
-    # 1. Get current IAM user identity
+    # 1. Get current IAM identity
     try:
         identity = sts.get_caller_identity()
         account_id = identity['Account']
@@ -350,29 +361,40 @@ def setup_aurora_iam_policy_for_current_user(
         logger.error(f"❌ Error getting caller identity: {e}")
         raise
     
-    # 2. Extract username from ARN
+    # ============================================================================
+    # 🔵 MODIFIED: Extract base role from assumed role session
+    # ============================================================================
+    # 2. Extract username/role from ARN and determine identity type
     current_user = None
+    current_role = None
+    identity_type = None
     
     if ':user/' in arn:
         # Standard IAM user: arn:aws:iam::123456789012:user/username
-        current_user = arn.split(':user/')[-1].split('/')[-1]  # Handle paths like user/path/username
+        current_user = arn.split(':user/')[-1].split('/')[-1]
+        identity_type = 'user'
         logger.info(f"  Type: IAM User")
         logger.info(f"  Username: {current_user}")
         
     elif ':assumed-role/' in arn:
-        # Assumed role: arn:aws:sts::123456789012:assumed-role/role-name/session-name
-        role_name = arn.split(':assumed-role/')[-1].split('/')[0]
-        logger.info(f"  Type: Assumed Role")
-        logger.info(f"  Role Name: {role_name}")
-        raise ValueError(
-            f"Cannot attach policy to assumed role session.\n"
-            f"You are running as assumed role '{role_name}'.\n"
-            f"Please attach the policy directly to the role '{role_name}' instead:\n"
-            f"  iam.attach_role_policy(RoleName='{role_name}', PolicyArn=policy_arn)"
+        # 🔵 MODIFIED: Extract BASE ROLE name from assumed role session
+        # Assumed role ARN: arn:aws:sts::123456789012:assumed-role/RoleName/session-name
+        # We want to extract "RoleName" (the base role)
+        parts = arn.split(':assumed-role/')[-1].split('/')
+        current_role = parts[0]  # This is the BASE ROLE name
+        session_name = parts[1] if len(parts) > 1 else 'unknown'
+        
+        identity_type = 'role'
+        logger.info(f"  Type: Assumed Role Session")
+        logger.info(f"  Base Role: {current_role}")
+        logger.info(f"  Session Name: {session_name}")
+        logger.info(f"  → Will attach policy to base role: {current_role}")
+        logger.warning(
+            f"⚠️  Policy will be attached to role '{current_role}'\n"
+            f"   This will grant Aurora access to ALL users/services that assume this role."
         )
         
     elif ':federated-user/' in arn:
-        # Federated user
         logger.error(f"  Type: Federated User")
         raise ValueError(
             "Cannot attach policies to federated users.\n"
@@ -380,7 +402,6 @@ def setup_aurora_iam_policy_for_current_user(
         )
         
     elif ':root' in arn:
-        # Root user
         logger.error(f"  Type: Root User")
         raise ValueError(
             "Cannot (and should not) attach policies to root user.\n"
@@ -391,7 +412,6 @@ def setup_aurora_iam_policy_for_current_user(
         raise ValueError(f"Unexpected ARN format: {arn}")
     
     # 3. Prepare new resource ARN
-    # Policy name is per user only (not per region or cluster)
     policy_name = f'AuroraIAMAuth-{db_user}'
     policy_arn = f"arn:aws:iam::{account_id}:policy/{policy_name}"
     
@@ -484,7 +504,7 @@ def setup_aurora_iam_policy_for_current_user(
                 {
                     "Effect": "Allow",
                     "Action": "rds-db:connect",
-                    "Resource": [new_resource_arn]  # Start with single resource in array
+                    "Resource": [new_resource_arn]
                 }
             ]
         }
@@ -501,7 +521,6 @@ def setup_aurora_iam_policy_for_current_user(
             logger.info(f"  Policy ARN: {policy_arn}")
             
         except iam.exceptions.EntityAlreadyExistsException:
-            # Race condition: policy was created between our check and create
             logger.info(f"✓ Policy was just created by another process")
             
         except Exception as e:
@@ -514,45 +533,111 @@ def setup_aurora_iam_policy_for_current_user(
         logger.error(f"Traceback: {trace_msg}")
         raise
     
-    # 5. Attach policy to current user (if not already attached)
+    # ============================================================================
+    # 🔵 MODIFIED: Attach to base role with better error handling
+    # ============================================================================
+    # 5. Attach policy to current user OR base role
     try:
-        # Check if policy is already attached
-        attached_policies = iam.list_attached_user_policies(UserName=current_user)
-        already_attached = any(
-            p['PolicyArn'] == policy_arn 
-            for p in attached_policies['AttachedPolicies']
-        )
-        
-        if already_attached:
-            logger.info(f"\n✓ Policy already attached to user: {current_user}")
-        else:
-            iam.attach_user_policy(
-                UserName=current_user,
-                PolicyArn=policy_arn
+        if identity_type == 'user':
+            # IAM User - attach directly
+            attached_policies = iam.list_attached_user_policies(UserName=current_user)
+            already_attached = any(
+                p['PolicyArn'] == policy_arn 
+                for p in attached_policies['AttachedPolicies']
             )
-            logger.info(f"\n✓ Successfully attached policy to user: {current_user}")
+            
+            if already_attached:
+                logger.info(f"\n✓ Policy already attached to user: {current_user}")
+            else:
+                iam.attach_user_policy(
+                    UserName=current_user,
+                    PolicyArn=policy_arn
+                )
+                logger.info(f"\n✓ Successfully attached policy to user: {current_user}")
+            
+            # Display summary
+            logger.info(f"\nAttached policies for user {current_user}:")
+            attached_policies = iam.list_attached_user_policies(UserName=current_user)
+            for policy in attached_policies['AttachedPolicies']:
+                marker = "  → " if policy['PolicyArn'] == policy_arn else "    "
+                logger.info(f"{marker}{policy['PolicyName']}")
         
-        # Display summary of all attached policies
-        logger.info(f"\nAttached policies for user {current_user}:")
-        attached_policies = iam.list_attached_user_policies(UserName=current_user)
-        for policy in attached_policies['AttachedPolicies']:
-            marker = "  → " if policy['PolicyArn'] == policy_arn else "    "
-            logger.info(f"{marker}{policy['PolicyName']}")
+        elif identity_type == 'role':
+            # 🔵 MODIFIED: Attach to BASE ROLE (not session)
+            logger.info(f"\n→ Attempting to attach policy to base role: {current_role}")
+            
+            try:
+                # Check if already attached to the base role
+                attached_policies = iam.list_attached_role_policies(RoleName=current_role)
+                already_attached = any(
+                    p['PolicyArn'] == policy_arn 
+                    for p in attached_policies['AttachedPolicies']
+                )
+                
+                if already_attached:
+                    logger.info(f"\n✓ Policy already attached to role: {current_role}")
+                else:
+                    # Attach to the BASE ROLE
+                    iam.attach_role_policy(
+                        RoleName=current_role,
+                        PolicyArn=policy_arn
+                    )
+                    logger.info(f"\n✓ Successfully attached policy to role: {current_role}")
+                    logger.warning(
+                        f"⚠️  All users/services assuming role '{current_role}' now have Aurora access"
+                    )
+                
+                # Display summary
+                logger.info(f"\nAttached policies for role {current_role}:")
+                attached_policies = iam.list_attached_role_policies(RoleName=current_role)
+                for policy in attached_policies['AttachedPolicies']:
+                    marker = "  → " if policy['PolicyArn'] == policy_arn else "    "
+                    logger.info(f"{marker}{policy['PolicyName']}")
+                    
+            except iam.exceptions.AccessDeniedException as e:
+                # 🔵 MODIFIED: Graceful handling of permission denied
+                logger.error(f"\n❌ Access Denied: Cannot attach policy to role '{current_role}'")
+                logger.error(f"   Your session does not have 'iam:AttachRolePolicy' permission")
+                logger.info(f"\n✓ Policy created successfully: {policy_arn}")
+                logger.info(f"   But could not be attached automatically.")
+                logger.info(f"\n📋 MANUAL STEPS REQUIRED:")
+                logger.info(f"\n Option 1: Have an administrator attach the policy to the role")
+                logger.info(f"   aws iam attach-role-policy \\")
+                logger.info(f"     --role-name {current_role} \\")
+                logger.info(f"     --policy-arn {policy_arn}")
+                logger.info(f"\n Option 2: Attach to your individual IAM user (if you have one)")
+                logger.info(f"   aws iam attach-user-policy \\")
+                logger.info(f"     --user-name YOUR_IAM_USERNAME \\")
+                logger.info(f"     --policy-arn {policy_arn}")
+                logger.info(f"\n Option 3: Grant the role permission to attach policies")
+                logger.info(f"   (Admin needs to add iam:AttachRolePolicy to role '{current_role}')")
+                
+                # Return policy ARN even though not attached
+                return policy_arn
+                
+            except iam.exceptions.NoSuchEntityException:
+                logger.error(f"\n❌ Role '{current_role}' not found")
+                logger.error(f"   This is unexpected - the role should exist since you're using it")
+                raise
         
         return policy_arn
         
     except iam.exceptions.NoSuchEntityException:
-        logger.error(f"\n❌ Error: User '{current_user}' not found")
+        entity_name = current_user if identity_type == 'user' else current_role
+        entity_type = 'User' if identity_type == 'user' else 'Role'
+        logger.error(f"\n❌ Error: {entity_type} '{entity_name}' not found")
         raise
         
     except iam.exceptions.LimitExceededException:
-        logger.error(f"\n❌ Error: Managed policy limit exceeded for user '{current_user}'")
-        logger.error("Maximum 10 managed policies can be attached to a user")
+        entity_name = current_user if identity_type == 'user' else current_role
+        entity_type = 'user' if identity_type == 'user' else 'role'
+        logger.error(f"\n❌ Error: Managed policy limit exceeded for {entity_type} '{entity_name}'")
+        logger.error("Maximum 10 managed policies can be attached to a user or role")
         logger.error("Consider using inline policies or consolidating existing policies")
         raise
         
     except Exception as e:
-        logger.error(f"\n❌ Error attaching policy to user: {e}")
+        logger.error(f"\n❌ Error attaching policy: {e}")
         trace_msg = traceback.format_exc()
         logger.error(f"Traceback: {trace_msg}")
         raise

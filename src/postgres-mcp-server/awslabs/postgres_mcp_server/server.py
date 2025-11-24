@@ -349,17 +349,22 @@ def create_cluster(
                 f'with_express_configuration:{with_express_configuration}')
 
     if with_express_configuration:
-        response = internal_create_express_cluster(cluster_identifier)
+        internal_create_express_cluster(cluster_identifier)
+
+        properties = internal_get_cluster_properties(
+            cluster_identifier=cluster_identifier, 
+            region=region, 
+            with_express_configuration=with_express_configuration)
 
         setup_aurora_iam_policy_for_current_user(
-            db_user=response['MasterUsername'],
-            cluster_resource_id=response['DbClusterResourceId'], 
+            db_user=properties['MasterUsername'],
+            cluster_resource_id=properties['DbClusterResourceId'], 
             cluster_region=region)
         
         internal_connect_to_database(
             region = region,
             cluster_identifier=cluster_identifier,
-            db_endpoint=response['Endpoint'],
+            db_endpoint=properties['Endpoint'],
             port=5432,
             database=database,
             with_express_configuration=with_express_configuration)
@@ -367,8 +372,8 @@ def create_cluster(
         result = {
             "status":"Completed",
             "cluster_identifier": cluster_identifier,
-            "db_endpoint":response['Endpoint'],
-            "message":"cluster creation completed successfully"
+            "db_endpoint":properties['Endpoint'],
+            "message":"Express cluster creation completed successfully"
         }
 
         return json.dumps(result, indent=2)
