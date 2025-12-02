@@ -608,12 +608,6 @@ def internal_connect_to_database(
 
     db_connection = None
     if  connection_method == ConnectionMethod.PG_WIRE_IAM_PROTOCOL:
-        rds_client = boto3.client('rds', region_name=region)
-        token = rds_client.generate_db_auth_token(
-            DBHostname=db_endpoint,
-            Port=port,
-            DBUsername=masteruser,
-            Region=region)
 
         db_connection = PsycopgPoolConnection(
             host=db_endpoint,
@@ -622,8 +616,9 @@ def internal_connect_to_database(
             readonly=readonly_query,
             secret_arn='',
             db_user=masteruser,
-            iam_auth_token=token,
-            region=region)
+            region=region,
+            is_iam_auth=True)
+        
     elif connection_method == ConnectionMethod.RDS_API:
         db_connection = RDSDataAPIConnection(
             cluster_arn=cluster_arn,
@@ -640,8 +635,8 @@ def internal_connect_to_database(
             readonly=readonly_query,
             secret_arn=secret_arn,
             db_user='',
-            iam_auth_token='',
-            region=region)
+            region=region,
+            is_iam_auth=False)
     
     if db_connection:
         db_connection_map.set(connection_method, cluster_identifier, db_endpoint, database, db_connection)

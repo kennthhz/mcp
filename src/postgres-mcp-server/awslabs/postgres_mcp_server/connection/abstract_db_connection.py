@@ -37,15 +37,6 @@ class AbstractDBConnection(ABC):
             bool: True if the connection is read-only, False otherwise
         """
         return self._readonly
-    
-    @abstractmethod
-    def is_expired(self) -> bool:
-        """If connection is expired
-
-        Returns:
-            bool: True if the connection is expired, False otherwise
-        """
-        pass
 
     @abstractmethod
     async def execute_query(
