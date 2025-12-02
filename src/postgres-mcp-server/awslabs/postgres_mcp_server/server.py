@@ -22,9 +22,9 @@ import threading
 import traceback
 import boto3
 
-from awslabs.postgres_mcp_server.connection.db_connection_map import DBConnectionMap, ConnectionMethod
+from awslabs.postgres_mcp_server.connection.db_connection_map import DBConnectionMap, ConnectionMethod, DatabaseType
 from awslabs.postgres_mcp_server.connection.rds_api_connection import RDSDataAPIConnection
-from awslabs.postgres_mcp_server.connection.cp_api_connection import internal_get_cluster_properties, internal_create_serverless_cluster, internal_create_express_cluster, setup_aurora_iam_policy_for_current_user
+from awslabs.postgres_mcp_server.connection.cp_api_connection import internal_get_cluster_properties, internal_create_serverless_cluster, internal_create_express_cluster, setup_aurora_iam_policy_for_current_user, internal_get_instance_properties
 from awslabs.postgres_mcp_server.connection.psycopg_pool_connection import PsycopgPoolConnection
 from awslabs.postgres_mcp_server.connection.abstract_db_connection import AbstractDBConnection
 from awslabs.postgres_mcp_server.mutable_sql_detector import (
@@ -237,6 +237,8 @@ async def get_table_schema(
     description='Connect to a specific database and save the connection internally')
 def connect_to_database(
     region: Annotated[str, Field(description='region')],
+    database_type: Annotated[DatabaseType, Field(description='database type')],
+    connection_method: Annotated[ConnectionMethod, Field(description='connection method')],
     cluster_identifier: Annotated[str, Field(description='cluster identifier')],
     db_endpoint: Annotated[str, Field(description='database endpoint')],
     port: Annotated[int, Field(description='Postgres port')],
@@ -246,16 +248,34 @@ def connect_to_database(
     """Connect to a specific database save the connection internally
 
     Args:
-        region: region
-        cluster_identifier: cluster identifier
+        region: region of the database. Required parametere.
+        database_type: Either APG for Aurora Postgres or RPG for RDS Postgres cluster. Required parameter
+        connection_type: Either RDS_API, IAM, or PG_AUTH. Required parameter
+        cluster_identifier: Either Aurora Postgres cluster identifier or RDS Postgres cluster identifier
         db_endpoint: database endpoint
-        database: database name
+        database: database name. Required parameter
         with_express_configuration: if the database is associated express configuration
+
+        Supported scenario:
+        1. Aurora Postgres database with RDS_API + Credential Manager: 
+            cluster_identifier must be set
+            db_endpoint and port will be ignored
+        2. Aurora Postgres database with direct connection + IAM: 
+            cluster_identifier must be set
+            db_endpoint must be set
+        3. Aurora Postgres database with direct connection + PG_AUTH (Credential Manager): 
+            cluster_identifier must be set
+            db_endpoint must be set
+        4. RDS Postgres database with direct connection + PG_AUTH (Credential Manager):
+            credential manager setting is either on instance or cluster
+            db_endpoint must be set
     """
 
     try:
         db_connection, llm_response = internal_connect_to_database(
             region=region,
+            database_type=database_type,
+            connection_method=connection_method,
             cluster_identifier=cluster_identifier,
             db_endpoint=db_endpoint,
             port=port,
@@ -321,7 +341,7 @@ def get_database_connection_info()->str:
 
 @mcp.tool(
     name='create_cluster',
-    description='Create an RDS/Aurora cluster')
+    description='Create an Aurora Postgres cluster')
 def create_cluster(
     region: Annotated[str, Field(description='region')],
     cluster_identifier: Annotated[str, Field(description='cluster identifier')],
@@ -348,6 +368,12 @@ def create_cluster(
                 f'engine_version:{engine_version} '
                 f'with_express_configuration:{with_express_configuration}')
 
+    database_type = DatabaseType.APG
+    if with_express_configuration:
+        connection_method = ConnectionMethod.PG_WIRE_IAM_PROTOCOL
+    else:
+        connection_method = ConnectionMethod.RDS_API
+
     if with_express_configuration:
         internal_create_express_cluster(cluster_identifier)
 
@@ -363,6 +389,8 @@ def create_cluster(
         
         internal_connect_to_database(
             region = region,
+            database_type = database_type,
+            connection_method = connection_method,
             cluster_identifier=cluster_identifier,
             db_endpoint=properties['Endpoint'],
             port=5432,
@@ -389,8 +417,8 @@ def create_cluster(
 
     t = threading.Thread(
         target=create_cluster_worker,
-        args=(job_id, region, cluster_identifier, engine_version, database),
-        daemon=False,
+        args=(job_id, region, database_type, connection_method, cluster_identifier, engine_version, database),
+        daemon=False
     )
     t.start()
 
@@ -434,6 +462,8 @@ def get_job_status(job_id: str) -> dict:
 def create_cluster_worker(
         job_id:str, 
         region:str, 
+        database_type: DatabaseType,
+        connection_method: ConnectionMethod,
         cluster_identifier:str, 
         engine_version:str, 
         database:str):
@@ -456,6 +486,8 @@ def create_cluster_worker(
         
         internal_connect_to_database(
             region = region,
+            database_type = database_type,
+            connection_method = connection_method,
             cluster_identifier=cluster_identifier,
             db_endpoint=cluster_result["Endpoint"],
             port=5432,
@@ -478,6 +510,8 @@ def create_cluster_worker(
 
 def internal_connect_to_database(
     region: Annotated[str, Field(description='region')],
+    database_type: Annotated[DatabaseType, Field(description='database type')],
+    connection_method: Annotated[ConnectionMethod, Field(description='connection method')],
     cluster_identifier: Annotated[str, Field(description='cluster identifier')],
     db_endpoint: Annotated[str, Field(description='database endpoint')],
     port: Annotated[int, Field(description='Postgres port')],
@@ -488,6 +522,8 @@ def internal_connect_to_database(
 
     Args:
         region: region
+        database_type: 
+        connection_method: 
         cluster_identifier: cluster identifier
         db_endpoint: database endpoint
         database: database name
@@ -499,6 +535,8 @@ def internal_connect_to_database(
 
     logger.info(f'Enter internal_connect_to_database\n'
                 f'region:{region}\n'
+                f'database_type:{database_type}\n'
+                f'connection_method:{connection_method}\n'
                 f'cluster_identifier:{cluster_identifier}\n'
                 f'db_endpoint:{db_endpoint}\n'
                 f'database:{database}\n'
@@ -508,22 +546,23 @@ def internal_connect_to_database(
     if not region:
         raise ValueError("region can't be none or empty")
     
-    if not cluster_identifier:
-        raise ValueError("cluster_identifier can't be none or empty")
+    if not connection_method:
+        raise ValueError("connection_method can't be none or empty")
     
-    connection_method = ConnectionMethod.RDS_API
-    existing_conn = db_connection_map.get(ConnectionMethod.RDS_API, cluster_identifier, db_endpoint, database)
-    if not existing_conn:
-        existing_conn = db_connection_map.get(ConnectionMethod.PG_WIRE_PROTOCOL, cluster_identifier, db_endpoint, database)   
-        connection_method = ConnectionMethod.PG_WIRE_PROTOCOL
+    if not database_type:
+        raise ValueError("database_type can't be none or empty")
+    
+    if database_type == DatabaseType.APG and not cluster_identifier:
+        raise ValueError("cluster_identifier can't be none or empty for Aurora Postgres Database")
 
-
+    existing_conn = db_connection_map.get(connection_method, cluster_identifier, db_endpoint, database, port)
     if existing_conn and (not existing_conn.is_expired()):
         llm_response = json.dumps({
                 "connection_method": connection_method,
                 "cluster_identifier": cluster_identifier,
                 "db_endpoint": db_endpoint,
-                "database" : database
+                "database" : database,
+                "port": port
             }, indent=2, default=str)
         return (existing_conn, llm_response)
     
@@ -533,32 +572,48 @@ def internal_connect_to_database(
     secret_arn:str = ''
     with_express_config:bool = False
     
-    properties = internal_get_cluster_properties(
-        cluster_identifier=cluster_identifier, 
-        region=region, 
-        with_express_configuration=with_express_configuration)
+    if cluster_identifier:
+        # Can be either APG (APG always requires cluster) or RPG multi-AZ cluster deployment case
+        cluster_properties = internal_get_cluster_properties(
+            cluster_identifier=cluster_identifier, 
+            region=region, 
+            with_express_configuration=with_express_configuration)
 
-    enable_data_api = properties.get("HttpEndpointEnabled", False)
-    masteruser = properties.get("MasterUsername", '')
-    cluster_arn = properties.get("DBClusterArn", '')
-    secret_arn = properties.get("MasterUserSecret", {}).get("SecretArn")
-    db_endpoint = properties.get("Endpoint", '')
-    
-    logger.info(f"enable_data_api:{enable_data_api} "
-                f"masteruser:{masteruser} "
-                f"cluster_arn:{cluster_arn} "
-                f"secret_arn:{secret_arn} "
-                f"with_express_config:{with_express_config} ")
-    
+        enable_data_api = cluster_properties.get("HttpEndpointEnabled", False)
+        masteruser = cluster_properties.get("MasterUsername", '')
+        cluster_arn = cluster_properties.get("DBClusterArn", '')
+        secret_arn = cluster_properties.get("MasterUserSecret", {}).get("SecretArn")
+
+        if not db_endpoint:
+            # if db_endpoint not set, we will use cluster's endpoint
+            db_endpoint = cluster_properties.get("Endpoint", '')
+            port = int(cluster_properties.get("Port", ''))
+    else:
+        # Must be RPG instance only deployment case (i.e. without cluster)
+        instance_properties = internal_get_instance_properties(db_endpoint, region)
+        masteruser = instance_properties.get("MasterUsername", '')
+        secret_arn = instance_properties.get("MasterUserSecret", {}).get("SecretArn")
+        port = int(instance_properties.get('Endpoint', {}).get('Port'))
+
+    logger.info(f"About to create internal DB connections with:"
+        f"enable_data_api:{enable_data_api}\n"
+        f"masteruser:{masteruser}\n"
+        f"cluster_arn:{cluster_arn}\n"
+        f"secret_arn:{secret_arn}\n"
+        f"db_endpoint:{db_endpoint}\n"
+        f"port:{port}\n"
+        f"with_express_config:{with_express_config}\n"
+        f"region:{region}\n"
+        f"readonly:{readonly_query}")
+
     db_connection = None
-    if with_express_configuration:
+    if  connection_method == ConnectionMethod.PG_WIRE_IAM_PROTOCOL:
         rds_client = boto3.client('rds', region_name=region)
         token = rds_client.generate_db_auth_token(
             DBHostname=db_endpoint,
             Port=port,
             DBUsername=masteruser,
-            Region=region
-        )
+            Region=region)
 
         db_connection = PsycopgPoolConnection(
             host=db_endpoint,
@@ -569,18 +624,15 @@ def internal_connect_to_database(
             db_user=masteruser,
             iam_auth_token=token,
             region=region)
-        connection_method = ConnectionMethod.PG_WIRE_PROTOCOL
-
-    elif enable_data_api and secret_arn:
+    elif connection_method == ConnectionMethod.RDS_API:
         db_connection = RDSDataAPIConnection(
             cluster_arn=cluster_arn,
             secret_arn=str(secret_arn),
             database=database,
             region=region,
             readonly=readonly_query)
-        connection_method = ConnectionMethod.RDS_API
-
-    elif db_endpoint and secret_arn:
+    else:
+        # must be connection_method == ConnectionMethod.PG_WIRE_PROTOCOL
         db_connection = PsycopgPoolConnection(
             host=db_endpoint,
             port=port,
@@ -590,7 +642,6 @@ def internal_connect_to_database(
             db_user='',
             iam_auth_token='',
             region=region)
-        connection_method = ConnectionMethod.PG_WIRE_PROTOCOL
     
     if db_connection:
         db_connection_map.set(connection_method, cluster_identifier, db_endpoint, database, db_connection)
@@ -598,13 +649,12 @@ def internal_connect_to_database(
                 "connection_method": connection_method,
                 "cluster_identifier": cluster_identifier,
                 "db_endpoint": db_endpoint,
-                "database" : database
+                "database" : database,
+                "port": port
             }, indent=2, default=str)
-        
         return (db_connection, llm_response)
 
-
-    raise ValueError("Can't create connection becaseu of parameter")
+    raise ValueError("Can't create connection because invalid input parameter combination")
 
 def main():
 
@@ -620,52 +670,38 @@ def main():
         description='An AWS Labs Model Context Protocol (MCP) server for postgres'
     )
 
-    parser.add_argument('--connection_method', help='Connection method to the database. It can be RDS_API or PG_WIRE_PROTOCOL)')
-    parser.add_argument('--authentication_method', help='Authentication method to connect to the database. It can be Postgres or IAM)')
-    parser.add_argument('--resource_arn', help='ARN of the RDS cluster (for RDS Data API)')
-    parser.add_argument('--hostname', help='Database hostname (for direct PostgreSQL connection)')
+    parser.add_argument('--connection_method', help='Connection method to the database. It can be RDS_API, PG_WIRE_PROTOCOL OR PG_WIRE_IAM_PROTOCOL)')
+    parser.add_argument('--db_cluster_arn', help='ARN of the RDS or Aurora Postgres cluster')
+    parser.add_argument('--db_type', help='APG for Aurora Postgres or RPG for RDS Postgres')
+    parser.add_argument('--db_endpoint', help='Instance endpoint address')
     parser.add_argument('--region', help='AWS region')
-    parser.add_argument('--readonly', action='store_true', help='Enforce readonly SQL statements')
-
-    # secret_arn is only applicable if auth method is Postgres which means PG user and password. 
-    # It doesn't apply to IAM auth who token is dyanmically generated
-    parser.add_argument('--secret_arn', help='ARN of the Secrets Manager secret for database credentials')
-
-    # If database is not set for connection_method = PG_WIRE_PROTOCOL, MCP will not make a connection during start up.
-    # Instead, the user should make connection with MCP tool calls
+    parser.add_argument('--allow_write_query', action='store_true', help='Enforce readonly SQL statements')
     parser.add_argument('--database', help='Database name')
     parser.add_argument('--port', type=int, default=5432, help='Database port (default: 5432)')
-
     args = parser.parse_args()
 
-    if args.connection_method == 'PG_WIRE_PROTOCOL' and (not args.hostname):
-        parser.error('You must set --hostname when connection method is PG_WIRE_PROTOCOL')
-
-    if args.connection_method == 'RDS_API' and args.hostname:
-        parser.error('You must not set --hostname when connection method is RDS_API')
-
-    if args.authentication_method == 'IAM' and args.connection_method == 'RDS_API':
-        parser.error('IAM authentication is not supported for connection method of RDS_API')
-
-    readonly_query = args.readonly
-
     logger.info(f"MCP configuration:\n"
-                f"resouce_arn:{args.resource_arn}\n"
-                f"hostname:{args.hostname}\n"
+                f"db_type:{args.db_type}\n"
+                f"db_cluster_arn:{args.db_cluster_arn}\n"
+                f"connection_method:{args.connection_method}\n"
+                f"db_endpoint:{args.db_endpoint}\n"
                 f"region:{args.region}\n"
-                f"readonly:{readonly_query}\n"
+                f"allow_write_query:{args.allow_write_query}\n"
                 f"database:{args.database}\n"
                 f"port:{args.port}\n")
+    
+    readonly_query = not args.allow_write_query
 
     try:
-        if args.resource_arn:
+        if args.db_type:
             # Create the appropriate database connection based on the provided parameters
             db_connection: Optional[AbstractDBConnection] = None
-            connection_method: ConnectionMethod = ConnectionMethod.RDS_API
 
-            cluster_identifier = args.resource_arn.split(":")[-1]
+            cluster_identifier = args.db_cluster_arn.split(":")[-1]
             db_connection, llm_response = internal_connect_to_database(
                 region=args.region,
+                database_type=DatabaseType[args.db_type],
+                connection_method=ConnectionMethod[args.connection_method],
                 cluster_identifier=cluster_identifier,
                 db_endpoint=args.hostname,
                 port=args.port,
@@ -675,7 +711,7 @@ def main():
             if db_connection:
                 ctx = DummyCtx()
                 response = asyncio.run(run_query('SELECT 1', ctx, 
-                    connection_method, cluster_identifier, args.hostname, args.database))
+                    ConnectionMethod[args.connection_method], cluster_identifier, args.db_endpoint, args.database))
                 if (
                     isinstance(response, list)
                     and len(response) == 1

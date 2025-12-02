@@ -14,6 +14,31 @@ def internal_create_rds_client(region:str, with_express_configuration:bool):
     else:
         return boto3.client('rds', region_name=region)
 
+def internal_get_instance_properties(target_endpoint:str, region:str)-> Dict[str, Any]:
+    rds_client = internal_create_rds_client(region=region, with_express_configuration=False)
+    paginator = rds_client.get_paginator('describe_db_instances')
+    
+    # Iterate through all instances
+    try:
+        for page in paginator.paginate():
+            for instance in page['DBInstances']:
+                endpoint = instance.get('Endpoint', {}).get('Address') 
+                if endpoint == target_endpoint:
+                    return instance
+    except ClientError as e:
+        error_code = e.response['Error']['Code']
+        logger.error(
+            f"AWS error fetching all instances in region:{region} "
+            f"{error_code} - {e.response['Error']['Message']}"
+        )
+        raise
+    except Exception as e:
+        logger.error(f"Error fetchingall instances in region:{region}.  Error: {type(e).__name__}: {e}")
+        raise
+
+    not_found_error = f"AWS error fetching instance by endpoint: '{target_endpoint}' in region:{region}"
+    logger.error(not_found_error)
+    raise ValueError(not_found_error)
 
 def internal_get_cluster_properties(
     cluster_identifier: str,

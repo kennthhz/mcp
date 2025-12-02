@@ -22,6 +22,7 @@ parameters (host, port, database, user, password) or via AWS Secrets Manager.
 import json
 from awslabs.postgres_mcp_server.connection.abstract_db_connection import AbstractDBConnection
 from loguru import logger
+import boto3
 from psycopg_pool import AsyncConnectionPool
 from typing import Any, Dict, List, Optional, Tuple
 from datetime import datetime, timedelta
