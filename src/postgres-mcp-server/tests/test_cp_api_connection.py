@@ -7,8 +7,9 @@ from botocore.exceptions import ClientError, WaiterError
 from typing import Dict, List, Optional
 from awslabs.postgres_mcp_server.connection.cp_api_connection import (
     internal_create_serverless_cluster,
-    internal_delete_cluster,
-    get_rds_cluster_and_secret_arn
+    internal_create_rds_client,
+    internal_get_cluster_properties,
+    internal_create_express_cluster,
 )
 
 
@@ -154,11 +155,260 @@ def mock_print():
 
 
 # =============================================================================
+# TESTS FOR: internal_create_rds_client
+# =============================================================================
+
+class TestInternalCreateRdsClient:
+    """Tests for internal_create_rds_client function."""
+    
+    @patch('awslabs.postgres_mcp_server.connection.cp_api_connection.boto3.client')
+    def test_create_rds_client_standard(self, mock_boto3_client):
+        """Test creating standard RDS client."""
+        
+        internal_create_rds_client(region='us-west-2', with_express_configuration=False)
+        
+        mock_boto3_client.assert_called_once_with('rds', region_name='us-west-2')
+    
+    @patch('awslabs.postgres_mcp_server.connection.cp_api_connection.boto3.client')
+    def test_create_rds_client_with_express(self, mock_boto3_client):
+        """Test creating RDS client with express configuration."""
+        
+        internal_create_rds_client(region='us-west-2', with_express_configuration=True)
+        
+        # Verify the client is created with express configuration
+        mock_boto3_client.assert_called_once_with(
+            'rds',
+            region_name='us-east-2',
+            endpoint_url='https://rds-preview.us-east-2.amazonaws.com'
+        )
+
+
+# =============================================================================
+# TESTS FOR: internal_get_cluster_properties
+# =============================================================================
+
+class TestInternalGetClusterProperties:
+    """Tests for internal_get_cluster_properties function."""
+    
+    def test_get_cluster_properties_empty_cluster_id_raises_error(self):
+        """Test that empty cluster_identifier raises ValueError."""
+        with pytest.raises(ValueError, match="cluster_identifier and region are required"):
+            internal_get_cluster_properties('', 'us-east-1')
+
+    def test_get_cluster_properties_empty_region_raises_error(self):
+        """Test that empty region raises ValueError."""
+        with pytest.raises(ValueError, match="cluster_identifier and region are required"):
+            internal_get_cluster_properties('test-cluster', '')
+
+    @patch('awslabs.postgres_mcp_server.connection.cp_api_connection.internal_create_rds_client')
+    def test_get_cluster_properties_empty_response(self, mock_create_client):
+        """Test handling of empty DBClusters list."""
+        mock_rds_client = MagicMock()
+        mock_create_client.return_value = mock_rds_client
+        mock_rds_client.describe_db_clusters.return_value = {'DBClusters': []}
+
+        with pytest.raises(ValueError, match="Cluster 'test-cluster' not found"):
+            internal_get_cluster_properties('test-cluster', 'us-east-1')
+
+    @patch('awslabs.postgres_mcp_server.connection.cp_api_connection.internal_create_rds_client')
+    def test_get_cluster_properties_success(self, mock_create_client):
+        """Test successfully retrieving cluster properties."""
+        
+        # Setup mock
+        mock_rds_client = MagicMock()
+        mock_create_client.return_value = mock_rds_client
+        mock_rds_client.describe_db_clusters.return_value = {
+            'DBClusters': [{
+                'DBClusterIdentifier': 'test-cluster',
+                'Status': 'available',
+                'Engine': 'aurora-postgresql'
+            }]
+        }
+        
+        # Execute
+        result = internal_get_cluster_properties('test-cluster', 'us-west-2')
+        
+        # Verify
+        assert result['DBClusterIdentifier'] == 'test-cluster'
+        assert result['Status'] == 'available'
+        mock_create_client.assert_called_once_with('us-west-2', False)
+        mock_rds_client.describe_db_clusters.assert_called_once_with(
+            DBClusterIdentifier='test-cluster'
+        )
+    
+    @patch('awslabs.postgres_mcp_server.connection.cp_api_connection.internal_create_rds_client')
+    def test_get_cluster_properties_with_express(self, mock_create_client):
+        """Test retrieving cluster properties with express configuration."""
+        
+        mock_rds_client = MagicMock()
+        mock_create_client.return_value = mock_rds_client
+        mock_rds_client.describe_db_clusters.return_value = {
+            'DBClusters': [{'DBClusterIdentifier': 'test-cluster'}]
+        }
+        
+        internal_get_cluster_properties('test-cluster', 'us-west-2', with_express_configuration=True)
+        
+        mock_create_client.assert_called_once_with('us-west-2', True)
+    
+    @patch('awslabs.postgres_mcp_server.connection.cp_api_connection.internal_create_rds_client')
+    def test_get_cluster_properties_client_error(self, mock_create_client):
+        """Test handling of AWS ClientError."""
+        
+        mock_rds_client = MagicMock()
+        mock_create_client.return_value = mock_rds_client
+        mock_rds_client.describe_db_clusters.side_effect = ClientError(
+            {'Error': {'Code': 'AccessDenied', 'Message': 'Access denied'}},
+            'DescribeDBClusters'
+        )
+        
+        with pytest.raises(ClientError):
+            internal_get_cluster_properties('test-cluster', 'us-west-2')
+
+
+# =============================================================================
+# TESTS FOR: internal_create_express_cluster
+# =============================================================================
+
+class TestInternalCreateExpressCluster:
+    """Tests for internal_create_express_cluster function."""
+    
+    @patch('awslabs.postgres_mcp_server.connection.cp_api_connection.internal_create_rds_client')
+    @patch('awslabs.postgres_mcp_server.connection.cp_api_connection.time')
+    def test_create_express_cluster_success(self, mock_time, mock_create_client):
+        """Test successful express cluster creation."""
+        
+        # Setup mocks
+        mock_rds_client = MagicMock()
+        mock_create_client.return_value = mock_rds_client
+        mock_time.time.side_effect = [100.0, 200.0]  # Start and end times
+        
+        mock_rds_client.describe_db_clusters.return_value = {
+            'DBClusters': [{
+                'DBClusterIdentifier': 'express-cluster',
+                'Status': 'creating',
+                'Engine': 'aurora-postgresql'
+            }]
+        }
+        
+        mock_waiter = MagicMock()
+        mock_rds_client.get_waiter.return_value = mock_waiter
+        
+        # Execute
+        result = internal_create_express_cluster('express-cluster')
+        
+        # Verify
+        assert result['DBClusterIdentifier'] == 'express-cluster'
+        mock_create_client.assert_called_once_with(region='us-east-2', with_express_configuration=True)
+        
+        # Verify create_db_cluster was called with correct parameters
+        mock_rds_client.create_db_cluster.assert_called_once()
+        call_kwargs = mock_rds_client.create_db_cluster.call_args[1]
+        assert call_kwargs['DBClusterIdentifier'] == 'express-cluster'
+        assert call_kwargs['Engine'] == 'aurora-postgresql'
+        assert call_kwargs['WithExpressConfiguration'] is True
+        assert any(tag['Key'] == 'CreatedBy' and tag['Value'] == 'MCP' for tag in call_kwargs['Tags'])
+        
+        # Verify waiter was used
+        mock_rds_client.get_waiter.assert_called_once_with('db_cluster_available')
+        mock_waiter.wait.assert_called_once()
+    
+    @patch('awslabs.postgres_mcp_server.connection.cp_api_connection.internal_create_rds_client')
+    def test_create_express_cluster_create_fails(self, mock_create_client):
+        """Test handling of cluster creation failure."""
+        
+        mock_rds_client = MagicMock()
+        mock_create_client.return_value = mock_rds_client
+        mock_rds_client.create_db_cluster.side_effect = ClientError(
+            {'Error': {'Code': 'DBClusterAlreadyExistsFault', 'Message': 'Cluster already exists'}},
+            'CreateDBCluster'
+        )
+        
+        with pytest.raises(ClientError) as exc_info:
+            internal_create_express_cluster('express-cluster')
+        
+        assert exc_info.value.response['Error']['Code'] == 'DBClusterAlreadyExistsFault'
+    
+    @patch('awslabs.postgres_mcp_server.connection.cp_api_connection.internal_create_rds_client')
+    def test_create_express_cluster_waiter_timeout(self, mock_create_client):
+        """Test handling of waiter timeout."""
+        
+        mock_rds_client = MagicMock()
+        mock_create_client.return_value = mock_rds_client
+        mock_rds_client.describe_db_clusters.return_value = {
+            'DBClusters': [{'DBClusterIdentifier': 'express-cluster'}]
+        }
+        
+        mock_waiter = MagicMock()
+        mock_waiter.wait.side_effect = WaiterError(
+            name='db_cluster_available',
+            reason='Max attempts exceeded',
+            last_response={}
+        )
+        mock_rds_client.get_waiter.return_value = mock_waiter
+        
+        with pytest.raises(WaiterError):
+            internal_create_express_cluster('express-cluster')
+    
+    @patch('awslabs.postgres_mcp_server.connection.cp_api_connection.internal_create_rds_client')
+    def test_create_express_cluster_unexpected_error(self, mock_create_client):
+        """Test handling of unexpected errors."""
+        
+        mock_rds_client = MagicMock()
+        mock_create_client.return_value = mock_rds_client
+        mock_rds_client.create_db_cluster.side_effect = Exception('Unexpected error')
+        
+        with pytest.raises(Exception) as exc_info:
+            internal_create_express_cluster('express-cluster')
+        
+        assert 'Unexpected error' in str(exc_info.value)
+
+
+# =============================================================================
 # TESTS FOR: internal_create_serverless_cluster
 # =============================================================================
 
 class TestInternalCreateServerlessCluster:
     """Tests for internal_create_serverless_cluster function."""
+    
+    def test_missing_region_raises_error(self):
+        """Test that missing region raises ValueError."""
+        with pytest.raises(ValueError, match='region is required'):
+            internal_create_serverless_cluster(
+                region='',
+                cluster_identifier='test-cluster',
+                engine_version='17.5',
+                database_name='testdb'
+            )
+
+    def test_missing_cluster_identifier_raises_error(self):
+        """Test that missing cluster_identifier raises ValueError."""
+        with pytest.raises(ValueError, match='cluster_identifier is required'):
+            internal_create_serverless_cluster(
+                region='us-east-1',
+                cluster_identifier='',
+                engine_version='17.5',
+                database_name='testdb'
+            )
+
+    def test_missing_engine_version_raises_error(self):
+        """Test that missing engine_version raises ValueError."""
+        with pytest.raises(ValueError, match='engine_version is required'):
+            internal_create_serverless_cluster(
+                region='us-east-1',
+                cluster_identifier='test-cluster',
+                engine_version='',
+                database_name='testdb'
+            )
+
+    def test_missing_database_name_raises_error(self):
+        """Test that missing database_name raises ValueError."""
+        with pytest.raises(ValueError, match='database_name is required'):
+            internal_create_serverless_cluster(
+                region='us-east-1',
+                cluster_identifier='test-cluster',
+                engine_version='17.5',
+                database_name=''
+            )
     
     def test_successful_cluster_creation(
         self, mock_boto3_client, mock_rds_client, mock_logger, mock_print
@@ -166,7 +416,7 @@ class TestInternalCreateServerlessCluster:
         """Test successful cluster and instance creation."""
         
         # Execute
-        cluster_arn, secret_arn = internal_create_serverless_cluster(
+        result = internal_create_serverless_cluster(
             region="us-east-1",
             cluster_identifier="test-cluster",
             engine_version="15.3",
@@ -176,6 +426,15 @@ class TestInternalCreateServerlessCluster:
             max_capacity=1.0,
             enable_cloudwatch_logs=True
         )
+        
+        # Verify the function returns a dictionary (cluster object)
+        assert isinstance(result, dict)
+        assert result["DBClusterIdentifier"] == "test-cluster"
+        assert result["DBClusterArn"] == "arn:aws:rds:us-east-1:123456789012:cluster:test-cluster"
+        
+        # Verify MasterUserSecret is present in the response
+        assert "MasterUserSecret" in result
+        assert "SecretArn" in result["MasterUserSecret"]
         
         # Verify boto3.client was called correctly
         mock_boto3_client.assert_called_once_with("rds", region_name="us-east-1")
@@ -224,15 +483,8 @@ class TestInternalCreateServerlessCluster:
             DBClusterIdentifier="test-cluster"
         )
         
-        # Verify return values
-        assert cluster_arn == "arn:aws:rds:us-east-1:123456789012:cluster:test-cluster"
-        assert "secret" in secret_arn
-        
         # Verify logging
         assert mock_logger.info.call_count > 0
-        
-        # Verify print was called
-        mock_print.assert_called_once()
     
     def test_cloudwatch_logs_disabled(self, mock_boto3_client, mock_rds_client, mock_print):
         """Test cluster creation with CloudWatch logs disabled."""
@@ -241,6 +493,8 @@ class TestInternalCreateServerlessCluster:
             region="us-east-1",
             cluster_identifier="test-cluster",
             engine_version="15.3",
+            database_name="testdb",
+            master_username="testuser",
             min_capacity=0.5,
             max_capacity=1.0,
             enable_cloudwatch_logs=False
@@ -264,6 +518,8 @@ class TestInternalCreateServerlessCluster:
                 region="us-east-1",
                 cluster_identifier="test-cluster",
                 engine_version="invalid",
+                database_name="testdb",
+                master_username="admin",
                 min_capacity=0.5,
                 max_capacity=1.0
             )
@@ -296,6 +552,8 @@ class TestInternalCreateServerlessCluster:
                 region="us-east-1",
                 cluster_identifier="test-cluster",
                 engine_version="15.3",
+                database_name="testdb",
+                master_username="admin",
                 min_capacity=0.5,
                 max_capacity=1.0
             )
@@ -317,6 +575,8 @@ class TestInternalCreateServerlessCluster:
                 region="us-east-1",
                 cluster_identifier="test-cluster",
                 engine_version="15.3",
+                database_name="testdb",
+                master_username="admin",
                 min_capacity=0.5,
                 max_capacity=1.0
             )
@@ -350,6 +610,8 @@ class TestInternalCreateServerlessCluster:
                 region="us-east-1",
                 cluster_identifier="test-cluster",
                 engine_version="15.3",
+                database_name="testdb",
+                master_username="admin",
                 min_capacity=0.5,
                 max_capacity=1.0
             )
@@ -366,16 +628,21 @@ class TestInternalCreateServerlessCluster:
             "DBClusters": [create_mock_cluster_response(include_secret=False)["DBCluster"]]
         }
         
-        cluster_arn, secret_arn = internal_create_serverless_cluster(
+        result = internal_create_serverless_cluster(
             region="us-east-1",
             cluster_identifier="test-cluster",
             engine_version="15.3",
+            database_name="testdb",
+            master_username="admin",
             min_capacity=0.5,
             max_capacity=1.0
         )
         
-        assert cluster_arn == "arn:aws:rds:us-east-1:123456789012:cluster:test-cluster"
-        assert secret_arn == ""
+        # Verify the function returns a dictionary (cluster object)
+        assert isinstance(result, dict)
+        assert result["DBClusterArn"] == "arn:aws:rds:us-east-1:123456789012:cluster:test-cluster"
+        # Verify MasterUserSecret is not in the response
+        assert "MasterUserSecret" not in result
     
     def test_unexpected_exception(self, mock_boto3_client, mock_rds_client, mock_print):
         """Test handling of unexpected exceptions."""
@@ -387,6 +654,8 @@ class TestInternalCreateServerlessCluster:
                 region="us-east-1",
                 cluster_identifier="test-cluster",
                 engine_version="15.3",
+                database_name="testdb",
+                master_username="admin",
                 min_capacity=0.5,
                 max_capacity=1.0
             )
@@ -395,503 +664,384 @@ class TestInternalCreateServerlessCluster:
 
 
 # =============================================================================
-# TESTS FOR: internal_delete_cluster
+# TESTS FOR: setup_aurora_iam_policy_for_current_user
 # =============================================================================
 
-class TestInternalDeleteCluster:
-    """Tests for internal_delete_cluster function."""
-    
-    def test_successful_cluster_deletion_with_instances(
-        self, mock_boto3_client, mock_rds_client, mock_time_sleep
-    ):
-        """Test successful deletion of cluster with instances."""
+class TestSetupAuroraIamPolicy:
+    """Tests for setup_aurora_iam_policy_for_current_user function."""
+
+    @pytest.fixture
+    def mock_sts_client(self):
+        """Mock STS client."""
+        from botocore.exceptions import ClientError
         
-        # Setup cluster with two instances
-        cluster_response = create_mock_cluster_response(
-            cluster_id="test-cluster",
-            members=["instance-1", "instance-2"]
+        with patch('boto3.client') as mock_client:
+            mock_sts = MagicMock()
+            mock_iam = MagicMock()
+            
+            # Mock IAM exceptions
+            class MockIAMExceptions:
+                NoSuchEntityException = type('NoSuchEntityException', (ClientError,), {})
+                EntityAlreadyExistsException = type('EntityAlreadyExistsException', (ClientError,), {})
+            
+            mock_iam.exceptions = MockIAMExceptions()
+            
+            def client_factory(service_name, **kwargs):
+                if service_name == 'sts':
+                    return mock_sts
+                elif service_name == 'iam':
+                    return mock_iam
+                return MagicMock()
+            
+            mock_client.side_effect = client_factory
+            yield mock_sts, mock_iam
+
+    def test_iam_user_identity(self, mock_sts_client):
+        """Test policy setup for IAM user identity."""
+        from awslabs.postgres_mcp_server.connection.cp_api_connection import (
+            setup_aurora_iam_policy_for_current_user
         )
         
-        # Track state for dynamic responses
-        cluster_deleted = {"value": False}
-        instances_deleted = {"instance-1": False, "instance-2": False}
+        mock_sts, mock_iam = mock_sts_client
         
-        def describe_clusters_side_effect(DBClusterIdentifier):
-            if cluster_deleted["value"]:
-                raise create_client_error("DBClusterNotFoundFault")
-            return {"DBClusters": [cluster_response["DBCluster"]]}
-        
-        def describe_instances_side_effect(DBInstanceIdentifier):
-            if instances_deleted.get(DBInstanceIdentifier, False):
-                raise create_client_error("DBInstanceNotFoundFault")
-            # First call returns instance, second call it's deleted
-            instances_deleted[DBInstanceIdentifier] = True
-            return {"DBInstances": [{}]}
-        
-        def delete_cluster_side_effect(**kwargs):
-            cluster_deleted["value"] = True
-            return {}
-        
-        mock_rds_client.describe_db_clusters.side_effect = describe_clusters_side_effect
-        mock_rds_client.describe_db_instances.side_effect = describe_instances_side_effect
-        mock_rds_client.delete_db_cluster.side_effect = delete_cluster_side_effect
-        
-        # Execute
-        internal_delete_cluster(region="us-east-1", cluster_id="test-cluster")
-        
-        # Verify instances were deleted
-        assert mock_rds_client.delete_db_instance.call_count == 2
-        delete_calls = [call[1]["DBInstanceIdentifier"] 
-                       for call in mock_rds_client.delete_db_instance.call_args_list]
-        assert "instance-1" in delete_calls
-        assert "instance-2" in delete_calls
-        
-        # Verify cluster was deleted
-        mock_rds_client.delete_db_cluster.assert_called_once_with(
-            DBClusterIdentifier="test-cluster",
-            SkipFinalSnapshot=True
-        )
-        
-        # Verify polling occurred
-        assert mock_time_sleep.call_count >= 1
-    
-    def test_cluster_not_found(self, mock_boto3_client, mock_rds_client):
-        """Test early return when cluster doesn't exist."""
-        
-        mock_rds_client.describe_db_clusters.side_effect = create_client_error(
-            "DBClusterNotFoundFault",
-            "Cluster not found"
-        )
-        
-        # Should return without raising
-        result = internal_delete_cluster(region="us-east-1", cluster_id="nonexistent")
-        
-        assert result is None
-        mock_rds_client.delete_db_cluster.assert_not_called()
-    
-    def test_missing_mcp_tag_raises_permission_error(
-        self, mock_boto3_client, mock_rds_client
-    ):
-        """Test that deletion fails when MCP tag is missing."""
-        
-        # Setup cluster without MCP tag
-        mock_rds_client.list_tags_for_resource.return_value = create_mock_tags(
-            include_mcp=False
-        )
-        
-        with pytest.raises(PermissionError) as exc_info:
-            internal_delete_cluster(region="us-east-1", cluster_id="test-cluster")
-        
-        # Note: Source code has f-string bug, so cluster_id won't appear in message
-        assert "MCP tool" in str(exc_info.value)
-        
-        # Verify deletion was not attempted
-        mock_rds_client.delete_db_instance.assert_not_called()
-        mock_rds_client.delete_db_cluster.assert_not_called()
-    
-    def test_cluster_without_instances(
-        self, mock_boto3_client, mock_rds_client, mock_time_sleep
-    ):
-        """Test deletion of cluster with no instances."""
-        
-        # Setup cluster with no members
-        cluster_response = create_mock_cluster_response(
-            cluster_id="test-cluster",
-            members=[]
-        )
-        
-        cluster_deleted = {"value": False}
-        
-        def describe_clusters_side_effect(DBClusterIdentifier):
-            if cluster_deleted["value"]:
-                raise create_client_error("DBClusterNotFoundFault")
-            return {"DBClusters": [cluster_response["DBCluster"]]}
-        
-        def delete_cluster_side_effect(**kwargs):
-            cluster_deleted["value"] = True
-            return {}
-        
-        mock_rds_client.describe_db_clusters.side_effect = describe_clusters_side_effect
-        mock_rds_client.delete_db_cluster.side_effect = delete_cluster_side_effect
-        
-        internal_delete_cluster(region="us-east-1", cluster_id="test-cluster")
-        
-        # Verify no instance deletion attempted
-        mock_rds_client.delete_db_instance.assert_not_called()
-        
-        # Verify cluster was deleted
-        mock_rds_client.delete_db_cluster.assert_called_once()
-    
-    def test_instance_already_deleted(
-        self, 
-        mock_boto3_client, 
-        mock_rds_client, 
-        mock_time_sleep,
-        mock_logger  # Add this too for completeness
-    ):
-        """Test handling when instance is already deleted."""
-        
-        cluster_response = create_mock_cluster_response(
-            cluster_id="test-cluster",
-            members=["instance-1"]
-        )
-        
-        cluster_deleted = {"value": False}
-        
-        # =========================================================================
-        # MOCK: describe_db_clusters
-        # =========================================================================
-        def describe_clusters_side_effect(DBClusterIdentifier):
-            if cluster_deleted["value"]:
-                raise create_client_error("DBClusterNotFoundFault")
-            return {"DBClusters": [cluster_response["DBCluster"]]}
-        
-        mock_rds_client.describe_db_clusters.side_effect = describe_clusters_side_effect
-        
-        # =========================================================================
-        # MOCK: list_tags_for_resource (MISSING!)
-        # =========================================================================
-        # The function needs to check if cluster has MCP tag
-        mock_rds_client.list_tags_for_resource.return_value = create_mock_tags(
-            include_mcp=True
-        )
-        
-        # =========================================================================
-        # MOCK: delete_db_instance - returns "already deleted" error
-        # =========================================================================
-        mock_rds_client.delete_db_instance.side_effect = create_client_error(
-            "DBInstanceNotFound",
-            "Instance already deleted"
-        )
-        
-        # =========================================================================
-        # MOCK: describe_db_instances (MISSING!)
-        # =========================================================================
-        # After delete_db_instance fails with "not found", the code still
-        # enters a polling loop to check if instances are deleted.
-        # Since instance is already deleted, this should immediately raise NotFound
-        mock_rds_client.describe_db_instances.side_effect = create_client_error(
-            "DBInstanceNotFoundFault",
-            "Instance not found"
-        )
-        
-        # =========================================================================
-        # MOCK: delete_db_cluster
-        # =========================================================================
-        def delete_cluster_side_effect(**kwargs):
-            cluster_deleted["value"] = True
-            return {}
-        
-        mock_rds_client.delete_db_cluster.side_effect = delete_cluster_side_effect
-        
-        # =========================================================================
-        # EXECUTE
-        # =========================================================================
-        # Should not raise exception
-        internal_delete_cluster(region="us-east-1", cluster_id="test-cluster")
-        
-        # =========================================================================
-        # VERIFY
-        # =========================================================================
-        # Verify delete_db_instance was attempted (and got "not found" error)
-        mock_rds_client.delete_db_instance.assert_called_once_with(
-            DBInstanceIdentifier="instance-1",
-            SkipFinalSnapshot=True,
-            DeleteAutomatedBackups=True
-        )
-        
-        # Verify cluster deletion still proceeded
-        mock_rds_client.delete_db_cluster.assert_called_once()
-        
-        # Verify we didn't sleep (since instance was already gone)
-        # Actually, we might sleep once checking for cluster deletion
-        # So just verify it was called a reasonable number of times
-        assert mock_time_sleep.call_count < 10  # Not stuck in infinite loop
-    
-    def test_instance_deletion_error_propagates(
-        self, 
-        mock_boto3_client, 
-        mock_rds_client,
-        mock_time_sleep,
-        mock_logger
-    ):
-        """
-        Test that non-NotFound errors during instance deletion propagate correctly.
-        
-        Scenario:
-        - Cluster exists with MCP tag
-        - Has one instance
-        - Instance deletion fails with InvalidDBInstanceState (not NotFound)
-        - Error should propagate up (not be swallowed)
-        - Cluster deletion should NOT be attempted
-        
-        This tests the error handling path in internal_delete_cluster where
-        deletion fails with an error OTHER than "not found" errors.
-        """
-        
-        # =========================================================================
-        # SETUP: Create cluster with one instance
-        # =========================================================================
-        cluster_response = create_mock_cluster_response(
-            cluster_id="test-cluster",
-            members=["instance-1"]
-        )
-        
-        # =========================================================================
-        # MOCK: describe_db_clusters (called once at start for validation)
-        # =========================================================================
-        # The function calls describe_db_clusters to:
-        # 1. Check if cluster exists
-        # 2. Get the cluster ARN for tag checking
-        # 3. Get list of member instances
-        mock_rds_client.describe_db_clusters.return_value = {
-            "DBClusters": [cluster_response["DBCluster"]]
+        # Mock IAM user identity
+        mock_sts.get_caller_identity.return_value = {
+            'Account': '123456789012',
+            'Arn': 'arn:aws:iam::123456789012:user/testuser',
+            'UserId': 'AIDAI123456789EXAMPLE'
         }
         
-        # =========================================================================
-        # MOCK: list_tags_for_resource (must return MCP tag to pass permission check)
-        # =========================================================================
-        # The function checks if cluster has CreatedBy=MCP tag
-        # Without this, it raises PermissionError before attempting deletion
-        mock_rds_client.list_tags_for_resource.return_value = create_mock_tags(
-            include_mcp=True
+        # Mock policy doesn't exist
+        mock_iam.get_policy.side_effect = mock_iam.exceptions.NoSuchEntityException(
+            {'Error': {'Code': 'NoSuchEntity'}}, 'GetPolicy'
         )
         
-        # =========================================================================
-        # MOCK: delete_db_instance (raises non-NotFound error)
-        # =========================================================================
-        # This is the key part: we're testing what happens when instance deletion
-        # fails with an error OTHER than "instance not found"
-        # Expected behavior: error should propagate, not be caught
-        mock_rds_client.delete_db_instance.side_effect = create_client_error(
-            "InvalidDBInstanceState",
-            "Cannot delete instance in current state"
-        )
-        
-        # =========================================================================
-        # EXECUTE: Call function and expect ClientError to propagate
-        # =========================================================================
-        with pytest.raises(ClientError) as exc_info:
-            internal_delete_cluster(region="us-east-1", cluster_id="test-cluster")
-        
-        # =========================================================================
-        # VERIFY: Correct error was raised
-        # =========================================================================
-        assert exc_info.value.response["Error"]["Code"] == "InvalidDBInstanceState"
-        assert "Cannot delete instance" in exc_info.value.response["Error"]["Message"]
-        
-        # =========================================================================
-        # VERIFY: describe_db_clusters was called once (initial check)
-        # =========================================================================
-        mock_rds_client.describe_db_clusters.assert_called_once_with(
-            DBClusterIdentifier="test-cluster"
-        )
-        
-        # =========================================================================
-        # VERIFY: list_tags_for_resource was called to check MCP tag
-        # =========================================================================
-        mock_rds_client.list_tags_for_resource.assert_called_once()
-        # Verify it was called with the cluster ARN
-        call_args = mock_rds_client.list_tags_for_resource.call_args
-        assert "arn:aws:rds:us-east-1:123456789012:cluster:test-cluster" in str(call_args)
-        
-        # =========================================================================
-        # VERIFY: delete_db_instance was called once (and failed)
-        # =========================================================================
-        mock_rds_client.delete_db_instance.assert_called_once_with(
-            DBInstanceIdentifier="instance-1",
-            SkipFinalSnapshot=True,
-            DeleteAutomatedBackups=True
-        )
-        
-        # =========================================================================
-        # VERIFY: describe_db_instances was NOT called
-        # =========================================================================
-        # Because deletion failed immediately, we never enter the polling loop
-        # to check if instances are deleted
-        mock_rds_client.describe_db_instances.assert_not_called()
-        
-        # =========================================================================
-        # VERIFY: delete_db_cluster was NOT attempted
-        # =========================================================================
-        # Critical: if instance deletion fails, cluster deletion should not proceed
-        mock_rds_client.delete_db_cluster.assert_not_called()
-        
-        # =========================================================================
-        # VERIFY: time.sleep was NOT called
-        # =========================================================================
-        # Proves we didn't enter the polling loop (which would cause infinite hang
-        # if time.sleep wasn't mocked)
-        mock_time_sleep.assert_not_called()
-        
-        # =========================================================================
-        # VERIFY: Appropriate error was logged
-        # =========================================================================
-        # Check that logger.error was called with error details
-        assert mock_logger.error.called
-        error_log_calls = [
-            str(call) for call in mock_logger.error.call_args_list
-        ]
-        # Should log something about the instance deletion error
-        assert any(
-            "instance-1" in call.lower() or "error" in call.lower() 
-            for call in error_log_calls
-        )
-    
-    def test_cluster_deletion_error(
-        self, mock_boto3_client, mock_rds_client, mock_time_sleep
-    ):
-        """Test handling of cluster deletion error."""
-        
-        cluster_response = create_mock_cluster_response(
-            cluster_id="test-cluster",
-            members=[]
-        )
-        mock_rds_client.describe_db_clusters.return_value = {
-            "DBClusters": [cluster_response["DBCluster"]]
+        # Mock policy creation
+        mock_iam.create_policy.return_value = {
+            'Policy': {
+                'Arn': 'arn:aws:iam::123456789012:policy/AuroraIAMAuth-dbuser'
+            }
         }
         
-        mock_rds_client.delete_db_cluster.side_effect = create_client_error(
-            "InvalidDBClusterStateFault",
-            "Cluster is not in valid state"
+        # Mock policy attachment
+        mock_iam.attach_user_policy.return_value = {}
+        
+        result = setup_aurora_iam_policy_for_current_user(
+            db_user='dbuser',
+            cluster_resource_id='cluster-ABC123',
+            cluster_region='us-east-1'
         )
         
-        with pytest.raises(ClientError) as exc_info:
-            internal_delete_cluster(region="us-east-1", cluster_id="test-cluster")
+        # Verify policy was created
+        assert mock_iam.create_policy.called
+        create_call = mock_iam.create_policy.call_args
+        assert create_call[1]['PolicyName'] == 'AuroraIAMAuth-dbuser'
         
-        assert exc_info.value.response["Error"]["Code"] == "InvalidDBClusterStateFault"
-    
-    def test_instance_polling_multiple_iterations(
-        self, mock_boto3_client, mock_rds_client, mock_time_sleep
-    ):
-        """Test that instance polling works correctly over multiple iterations."""
-        
-        cluster_response = create_mock_cluster_response(
-            cluster_id="test-cluster",
-            members=["instance-1", "instance-2"]
-        )
-        
-        cluster_deleted = {"value": False}
-        instance_check_counts = {"instance-1": 0, "instance-2": 0}
-        
-        def describe_clusters_side_effect(DBClusterIdentifier):
-            if cluster_deleted["value"]:
-                raise create_client_error("DBClusterNotFoundFault")
-            return {"DBClusters": [cluster_response["DBCluster"]]}
-        
-        def describe_instances_side_effect(DBInstanceIdentifier):
-            instance_check_counts[DBInstanceIdentifier] += 1
-            # instance-2 deleted after 1 check, instance-1 after 3 checks
-            if DBInstanceIdentifier == "instance-2" and instance_check_counts[DBInstanceIdentifier] > 1:
-                raise create_client_error("DBInstanceNotFoundFault")
-            if DBInstanceIdentifier == "instance-1" and instance_check_counts[DBInstanceIdentifier] > 3:
-                raise create_client_error("DBInstanceNotFoundFault")
-            return {"DBInstances": [{}]}
-        
-        def delete_cluster_side_effect(**kwargs):
-            cluster_deleted["value"] = True
-            return {}
-        
-        mock_rds_client.describe_db_clusters.side_effect = describe_clusters_side_effect
-        mock_rds_client.describe_db_instances.side_effect = describe_instances_side_effect
-        mock_rds_client.delete_db_cluster.side_effect = delete_cluster_side_effect
-        
-        internal_delete_cluster(region="us-east-1", cluster_id="test-cluster")
-        
-        # Verify sleep was called between polling iterations
-        assert mock_time_sleep.call_count >= 2
-        assert all(call[0][0] == 5 for call in mock_time_sleep.call_args_list)
-    
-    def test_cluster_polling_multiple_iterations(
-        self, mock_boto3_client, mock_rds_client, mock_time_sleep
-    ):
-        """Test that cluster polling works correctly over multiple iterations."""
-        
-        cluster_response = create_mock_cluster_response(
-            cluster_id="test-cluster",
-            members=[]
-        )
-        
-        describe_call_count = {"value": 0}
-        
-        def describe_clusters_side_effect(DBClusterIdentifier):
-            describe_call_count["value"] += 1
-            if describe_call_count["value"] <= 4:
-                return {"DBClusters": [cluster_response["DBCluster"]]}
-            else:
-                raise create_client_error("DBClusterNotFoundFault")
-        
-        mock_rds_client.describe_db_clusters.side_effect = describe_clusters_side_effect
-        
-        internal_delete_cluster(region="us-east-1", cluster_id="test-cluster")
-        
-        # Verify multiple polling iterations occurred
-        assert mock_time_sleep.call_count >= 3
-    
-    def test_tag_check_error_propagates(self, mock_boto3_client, mock_rds_client):
-        """Test that errors during tag checking propagate correctly."""
-        
-        mock_rds_client.list_tags_for_resource.side_effect = create_client_error(
-            "AccessDenied",
-            "Not authorized to list tags"
-        )
-        
-        with pytest.raises(ClientError) as exc_info:
-            internal_delete_cluster(region="us-east-1", cluster_id="test-cluster")
-        
-        assert exc_info.value.response["Error"]["Code"] == "AccessDenied"
+        # Verify policy was attached to user
+        mock_iam.attach_user_policy.assert_called_once()
+        attach_call = mock_iam.attach_user_policy.call_args
+        assert attach_call[1]['UserName'] == 'testuser'
 
-
-# =============================================================================
-# TESTS FOR: get_rds_cluster_and_secret_arn
-# =============================================================================
-
-class TestGetRdsClusterAndSecretArn:
-    """Tests for get_rds_cluster_and_secret_arn function."""
-    
-    def test_cluster_with_secret(self, mock_boto3_client, mock_rds_client):
-        """Test retrieving cluster with secret ARN."""
-        
-        cluster_arn, secret_arn = get_rds_cluster_and_secret_arn(
-            cluster_id="test-cluster",
-            region="us-east-1"
+    def test_assumed_role_identity(self, mock_sts_client):
+        """Test policy setup for assumed role identity."""
+        from awslabs.postgres_mcp_server.connection.cp_api_connection import (
+            setup_aurora_iam_policy_for_current_user
         )
         
-        assert cluster_arn == "arn:aws:rds:us-east-1:123456789012:cluster:test-cluster"
-        assert secret_arn == "arn:aws:secretsmanager:us-east-1:123456789012:secret:test-cluster-secret-abc123"
+        mock_sts, mock_iam = mock_sts_client
         
-        mock_boto3_client.assert_called_once_with("rds", region_name="us-east-1")
-        mock_rds_client.describe_db_clusters.assert_called_once_with(
-            DBClusterIdentifier="test-cluster"
-        )
-    
-    def test_cluster_without_secret(self, mock_boto3_client, mock_rds_client):
-        """Test retrieving cluster without secret ARN."""
-        
-        # Setup response without secret
-        mock_rds_client.describe_db_clusters.return_value = {
-            "DBClusters": [create_mock_cluster_response(include_secret=False)["DBCluster"]]
+        # Mock assumed role identity
+        mock_sts.get_caller_identity.return_value = {
+            'Account': '123456789012',
+            'Arn': 'arn:aws:sts::123456789012:assumed-role/MyRole/session-name',
+            'UserId': 'AROAI123456789EXAMPLE:session-name'
         }
         
-        cluster_arn, secret_arn = get_rds_cluster_and_secret_arn(
-            cluster_id="test-cluster",
-            region="us-east-1"
+        # Mock policy doesn't exist
+        mock_iam.get_policy.side_effect = mock_iam.exceptions.NoSuchEntityException(
+            {'Error': {'Code': 'NoSuchEntity'}}, 'GetPolicy'
         )
         
-        assert cluster_arn == "arn:aws:rds:us-east-1:123456789012:cluster:test-cluster"
-        assert secret_arn is None
-    
-    def test_cluster_not_found_raises_value_error(
-        self, mock_boto3_client, mock_rds_client
-    ):
-        """Test that ValueError is raised when cluster is not found."""
+        # Mock policy creation
+        mock_iam.create_policy.return_value = {
+            'Policy': {
+                'Arn': 'arn:aws:iam::123456789012:policy/AuroraIAMAuth-dbuser'
+            }
+        }
         
-        mock_rds_client.describe_db_clusters.return_value = {"DBClusters": []}
+        # Mock policy attachment
+        mock_iam.attach_role_policy.return_value = {}
         
-        with pytest.raises(ValueError) as exc_info:
-            get_rds_cluster_and_secret_arn(
-                cluster_id="nonexistent",
-                region="us-east-1"
+        result = setup_aurora_iam_policy_for_current_user(
+            db_user='dbuser',
+            cluster_resource_id='cluster-ABC123',
+            cluster_region='us-east-1'
+        )
+        
+        # Verify policy was attached to base role (not session)
+        mock_iam.attach_role_policy.assert_called_once()
+        attach_call = mock_iam.attach_role_policy.call_args
+        assert attach_call[1]['RoleName'] == 'MyRole'
+
+    def test_federated_user_raises_error(self, mock_sts_client):
+        """Test that federated user identity raises ValueError."""
+        from awslabs.postgres_mcp_server.connection.cp_api_connection import (
+            setup_aurora_iam_policy_for_current_user
+        )
+        
+        mock_sts, mock_iam = mock_sts_client
+        
+        # Mock federated user identity
+        mock_sts.get_caller_identity.return_value = {
+            'Account': '123456789012',
+            'Arn': 'arn:aws:sts::123456789012:federated-user/feduser',
+            'UserId': 'FEDUSER123'
+        }
+        
+        with pytest.raises(ValueError, match='Cannot attach policies to federated users'):
+            setup_aurora_iam_policy_for_current_user(
+                db_user='dbuser',
+                cluster_resource_id='cluster-ABC123',
+                cluster_region='us-east-1'
             )
+
+    def test_root_user_raises_error(self, mock_sts_client):
+        """Test that root user identity raises ValueError."""
+        from awslabs.postgres_mcp_server.connection.cp_api_connection import (
+            setup_aurora_iam_policy_for_current_user
+        )
         
-        assert "No cluster found" in str(exc_info.value)
+        mock_sts, mock_iam = mock_sts_client
+        
+        # Mock root user identity
+        mock_sts.get_caller_identity.return_value = {
+            'Account': '123456789012',
+            'Arn': 'arn:aws:iam::123456789012:root',
+            'UserId': '123456789012'
+        }
+        
+        with pytest.raises(ValueError, match='Cannot .* attach policies to root user'):
+            setup_aurora_iam_policy_for_current_user(
+                db_user='dbuser',
+                cluster_resource_id='cluster-ABC123',
+                cluster_region='us-east-1'
+            )
+
+    def test_invalid_db_user_raises_error(self, mock_sts_client):
+        """Test that invalid db_user raises ValueError."""
+        from awslabs.postgres_mcp_server.connection.cp_api_connection import (
+            setup_aurora_iam_policy_for_current_user
+        )
+        
+        with pytest.raises(ValueError, match='db_user must be a non-empty string'):
+            setup_aurora_iam_policy_for_current_user(
+                db_user='',
+                cluster_resource_id='cluster-ABC123',
+                cluster_region='us-east-1'
+            )
+
+    def test_invalid_cluster_resource_id_raises_error(self, mock_sts_client):
+        """Test that invalid cluster_resource_id raises ValueError."""
+        from awslabs.postgres_mcp_server.connection.cp_api_connection import (
+            setup_aurora_iam_policy_for_current_user
+        )
+        
+        with pytest.raises(ValueError, match='cluster_resource_id must be a non-empty string'):
+            setup_aurora_iam_policy_for_current_user(
+                db_user='dbuser',
+                cluster_resource_id='',
+                cluster_region='us-east-1'
+            )
+
+    def test_invalid_cluster_region_raises_error(self, mock_sts_client):
+        """Test that invalid cluster_region raises ValueError."""
+        from awslabs.postgres_mcp_server.connection.cp_api_connection import (
+            setup_aurora_iam_policy_for_current_user
+        )
+        
+        with pytest.raises(ValueError, match='cluster_region must be a non-empty string'):
+            setup_aurora_iam_policy_for_current_user(
+                db_user='dbuser',
+                cluster_resource_id='cluster-ABC123',
+                cluster_region=''
+            )
+
+    def test_policy_update_adds_new_resource(self, mock_sts_client):
+        """Test that existing policy is updated with new resource."""
+        from awslabs.postgres_mcp_server.connection.cp_api_connection import (
+            setup_aurora_iam_policy_for_current_user
+        )
+        
+        mock_sts, mock_iam = mock_sts_client
+        
+        # Mock IAM user identity
+        mock_sts.get_caller_identity.return_value = {
+            'Account': '123456789012',
+            'Arn': 'arn:aws:iam::123456789012:user/testuser',
+            'UserId': 'AIDAI123456789EXAMPLE'
+        }
+        
+        # Mock existing policy
+        mock_iam.get_policy.return_value = {
+            'Policy': {
+                'Arn': 'arn:aws:iam::123456789012:policy/AuroraIAMAuth-dbuser',
+                'DefaultVersionId': 'v1'
+            }
+        }
+        
+        # Mock existing policy document with one resource
+        mock_iam.get_policy_version.return_value = {
+            'PolicyVersion': {
+                'Document': {
+                    'Version': '2012-10-17',
+                    'Statement': [{
+                        'Effect': 'Allow',
+                        'Action': 'rds-db:connect',
+                        'Resource': ['arn:aws:rds-db:us-east-1:123456789012:dbuser:cluster-OLD123/dbuser']
+                    }]
+                }
+            }
+        }
+        
+        # Mock policy versions (less than 5)
+        mock_iam.list_policy_versions.return_value = {
+            'Versions': [
+                {'VersionId': 'v1', 'IsDefaultVersion': True, 'CreateDate': '2024-01-01'}
+            ]
+        }
+        
+        # Mock policy version creation
+        mock_iam.create_policy_version.return_value = {
+            'PolicyVersion': {'VersionId': 'v2'}
+        }
+        
+        result = setup_aurora_iam_policy_for_current_user(
+            db_user='dbuser',
+            cluster_resource_id='cluster-NEW456',
+            cluster_region='us-east-1'
+        )
+        
+        # Verify new policy version was created
+        assert mock_iam.create_policy_version.called
+        create_call = mock_iam.create_policy_version.call_args
+        
+        # Parse the policy document
+        import json
+        policy_doc = json.loads(create_call[1]['PolicyDocument'])
+        resources = policy_doc['Statement'][0]['Resource']
+        
+        # Verify both old and new resources are present
+        assert len(resources) == 2
+        assert 'cluster-OLD123' in str(resources)
+        assert 'cluster-NEW456' in str(resources)
+
+    def test_policy_already_includes_resource(self, mock_sts_client):
+        """Test that no update occurs if resource already exists in policy."""
+        from awslabs.postgres_mcp_server.connection.cp_api_connection import (
+            setup_aurora_iam_policy_for_current_user
+        )
+        
+        mock_sts, mock_iam = mock_sts_client
+        
+        # Mock IAM user identity
+        mock_sts.get_caller_identity.return_value = {
+            'Account': '123456789012',
+            'Arn': 'arn:aws:iam::123456789012:user/testuser',
+            'UserId': 'AIDAI123456789EXAMPLE'
+        }
+        
+        # Mock existing policy
+        mock_iam.get_policy.return_value = {
+            'Policy': {
+                'Arn': 'arn:aws:iam::123456789012:policy/AuroraIAMAuth-dbuser',
+                'DefaultVersionId': 'v1'
+            }
+        }
+        
+        # Mock policy document that already includes the resource
+        mock_iam.get_policy_version.return_value = {
+            'PolicyVersion': {
+                'Document': {
+                    'Version': '2012-10-17',
+                    'Statement': [{
+                        'Effect': 'Allow',
+                        'Action': 'rds-db:connect',
+                        'Resource': ['arn:aws:rds-db:us-east-1:123456789012:dbuser:cluster-ABC123/dbuser']
+                    }]
+                }
+            }
+        }
+        
+        result = setup_aurora_iam_policy_for_current_user(
+            db_user='dbuser',
+            cluster_resource_id='cluster-ABC123',
+            cluster_region='us-east-1'
+        )
+        
+        # Verify no new policy version was created
+        mock_iam.create_policy_version.assert_not_called()
+
+    def test_policy_version_limit_deletes_oldest(self, mock_sts_client):
+        """Test that oldest version is deleted when limit is reached."""
+        from awslabs.postgres_mcp_server.connection.cp_api_connection import (
+            setup_aurora_iam_policy_for_current_user
+        )
+        
+        mock_sts, mock_iam = mock_sts_client
+        
+        # Mock IAM user identity
+        mock_sts.get_caller_identity.return_value = {
+            'Account': '123456789012',
+            'Arn': 'arn:aws:iam::123456789012:user/testuser',
+            'UserId': 'AIDAI123456789EXAMPLE'
+        }
+        
+        # Mock existing policy
+        mock_iam.get_policy.return_value = {
+            'Policy': {
+                'Arn': 'arn:aws:iam::123456789012:policy/AuroraIAMAuth-dbuser',
+                'DefaultVersionId': 'v5'
+            }
+        }
+        
+        # Mock existing policy document
+        mock_iam.get_policy_version.return_value = {
+            'PolicyVersion': {
+                'Document': {
+                    'Version': '2012-10-17',
+                    'Statement': [{
+                        'Effect': 'Allow',
+                        'Action': 'rds-db:connect',
+                        'Resource': ['arn:aws:rds-db:us-east-1:123456789012:dbuser:cluster-OLD/dbuser']
+                    }]
+                }
+            }
+        }
+        
+        # Mock 5 policy versions (at limit)
+        from datetime import datetime
+        mock_iam.list_policy_versions.return_value = {
+            'Versions': [
+                {'VersionId': 'v1', 'IsDefaultVersion': False, 'CreateDate': datetime(2024, 1, 1)},
+                {'VersionId': 'v2', 'IsDefaultVersion': False, 'CreateDate': datetime(2024, 1, 2)},
+                {'VersionId': 'v3', 'IsDefaultVersion': False, 'CreateDate': datetime(2024, 1, 3)},
+                {'VersionId': 'v4', 'IsDefaultVersion': False, 'CreateDate': datetime(2024, 1, 4)},
+                {'VersionId': 'v5', 'IsDefaultVersion': True, 'CreateDate': datetime(2024, 1, 5)},
+            ]
+        }
+        
+        # Mock policy version creation
+        mock_iam.create_policy_version.return_value = {
+            'PolicyVersion': {'VersionId': 'v6'}
+        }
+        
+        result = setup_aurora_iam_policy_for_current_user(
+            db_user='dbuser',
+            cluster_resource_id='cluster-NEW',
+            cluster_region='us-east-1'
+        )
+        
+        # Verify oldest version was deleted
+        mock_iam.delete_policy_version.assert_called_once()
+        delete_call = mock_iam.delete_policy_version.call_args
+        assert delete_call[1]['VersionId'] == 'v1'  # Oldest non-default version
