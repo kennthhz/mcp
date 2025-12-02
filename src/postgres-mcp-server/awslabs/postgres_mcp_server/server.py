@@ -556,7 +556,7 @@ def internal_connect_to_database(
         raise ValueError("cluster_identifier can't be none or empty for Aurora Postgres Database")
 
     existing_conn = db_connection_map.get(connection_method, cluster_identifier, db_endpoint, database, port)
-    if existing_conn and (not existing_conn.is_expired()):
+    if existing_conn:
         llm_response = json.dumps({
                 "connection_method": connection_method,
                 "cluster_identifier": cluster_identifier,
