@@ -40,6 +40,7 @@ ENV/
 .coverage.*
 htmlcov/
 .pytest_cache/
+tests/integration_test_config.local.yaml
 
 # Ruff
 .ruff_cache/

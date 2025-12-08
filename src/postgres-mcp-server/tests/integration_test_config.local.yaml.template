@@ -1,0 +1,157 @@
+# Local Integration Test Configuration Template
+# Copy this file to integration_test_config.local.yaml and customize for your environment
+# The .local.yaml file is gitignored to prevent committing sensitive information
+
+# AWS Configuration
+aws:
+  region: us-east-2  # Change to your preferred region
+
+# Test Clusters Configuration
+clusters:
+  # Regular Aurora Serverless v2 cluster (uses RDS Data API)
+  regular:
+    cluster_identifier: "my-test-regular-cluster"  # Change to your cluster name
+    endpoint: "my-test-regular-cluster.cluster-abc123.us-east-2.rds.amazonaws.com"  # REQUIRED: Your cluster endpoint
+    port: 5432
+    database: "postgres"
+    engine_version: "17.5"
+    with_express_configuration: false
+    connection_methods:
+      - rdsapi
+      - pgwire  # Only works if RDS API disabled and publicly accessible
+      - pgwire_iam  # Works with IAM authentication enabled
+    
+  # Express configuration cluster (uses IAM authentication)
+  express:
+    cluster_identifier: "my-test-express-cluster"  # Change to your cluster name
+    endpoint: "my-test-express-cluster.cluster-xyz789.us-east-2.rds-preview.amazonaws.com"  # REQUIRED: Your cluster endpoint
+    port: 5432
+    database: "postgres"
+    engine_version: "17.5"
+    with_express_configuration: true
+    connection_methods:
+      - pgwire_iam
+
+# MCP Server Configuration Variants
+mcp_configurations:
+  readonly:
+    allow_write_query: false
+  
+  readwrite:
+    allow_write_query: true
+
+# Test Data
+test_data:
+  tables:
+    - name: "test_products"
+      schema: |
+        CREATE TABLE test_products (
+          id SERIAL PRIMARY KEY,
+          name VARCHAR(100) NOT NULL,
+          price DECIMAL(10,2),
+          category VARCHAR(50),
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+      sample_data:
+        - name: "Laptop"
+          price: 999.99
+          category: "Electronics"
+        - name: "Coffee Mug"
+          price: 12.50
+          category: "Kitchen"
+        - name: "Notebook"
+          price: 5.99
+          category: "Office"
+    
+    - name: "test_users"
+      schema: |
+        CREATE TABLE test_users (
+          id SERIAL PRIMARY KEY,
+          username VARCHAR(50) UNIQUE NOT NULL,
+          email VARCHAR(100),
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+      sample_data:
+        - username: "alice"
+          email: "alice@example.com"
+        - username: "bob"
+          email: "bob@example.com"
+
+# Test Scenarios
+test_scenarios:
+  # Cluster creation tests
+  cluster_creation:
+    - name: "Create regular cluster"
+      cluster_type: "regular"
+      expected_async: true
+    
+    - name: "Create express cluster"
+      cluster_type: "express"
+      expected_async: false
+  
+  # Connection tests
+  connection:
+    - name: "Connect via RDS API"
+      cluster_type: "regular"
+      connection_method: "rdsapi"
+    
+    - name: "Connect via PG Wire IAM"
+      cluster_type: "express"
+      connection_method: "pgwire_iam"
+    
+    - name: "Connect via PG Wire (Secrets Manager)"
+      cluster_type: "regular"
+      connection_method: "pgwire"
+      prerequisites:
+        - "RDS Data API must be disabled"
+        - "Cluster must be publicly accessible"
+    
+    - name: "Connect via PG Wire IAM (Regular Cluster)"
+      cluster_type: "regular"
+      connection_method: "pgwire_iam"
+      prerequisites:
+        - "IAM authentication must be enabled"
+        - "Cluster must be publicly accessible"
+  
+  # Query execution tests
+  query_execution:
+    - name: "SELECT query"
+      sql: "SELECT version()"
+      expected_readonly: true
+      expected_readwrite: true
+    
+    - name: "CREATE TABLE"
+      sql: "CREATE TABLE test_table (id SERIAL PRIMARY KEY, name VARCHAR(100))"
+      expected_readonly: false
+      expected_readwrite: true
+    
+    - name: "INSERT data"
+      sql: "INSERT INTO test_table (name) VALUES ('test')"
+      expected_readonly: false
+      expected_readwrite: true
+    
+    - name: "UPDATE data"
+      sql: "UPDATE test_table SET name = 'updated' WHERE id = 1"
+      expected_readonly: false
+      expected_readwrite: true
+    
+    - name: "DELETE data"
+      sql: "DELETE FROM test_table WHERE id = 1"
+      expected_readonly: false
+      expected_readwrite: true
+    
+    - name: "DROP TABLE"
+      sql: "DROP TABLE test_table"
+      expected_readonly: false
+      expected_readwrite: true
+
+# Cleanup Configuration
+cleanup:
+  delete_clusters_after_tests: false  # Set to true to auto-delete test clusters
+  drop_test_tables: true  # Drop test tables after tests complete
+
+# Optional: Override specific test timeouts (in seconds)
+timeouts:
+  cluster_creation: 600  # 10 minutes
+  connection: 30
+  query_execution: 60

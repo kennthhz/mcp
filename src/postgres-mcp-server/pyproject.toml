@@ -51,6 +51,7 @@ dev = [
     "pytest-asyncio>=0.26.0",
     "pytest-cov>=4.1.0",
     "pytest-mock>=3.12.0",
+    "pyyaml>=6.0.0",
 ]
 
 [build-system]
@@ -126,7 +127,8 @@ testpaths = [ "tests"]
 asyncio_mode = "auto"
 markers = [
     "live: marks tests that make live API calls (deselect with '-m \"not live\"')",
-    "asyncio: marks tests that use asyncio"
+    "asyncio: marks tests that use asyncio",
+    "integration: marks tests as integration tests that require real AWS resources (deselect with '-m \"not integration\"')"
 ]
 
 [tool.coverage.report]
