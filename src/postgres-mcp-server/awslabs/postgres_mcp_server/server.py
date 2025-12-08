@@ -24,7 +24,7 @@ import boto3
 
 from awslabs.postgres_mcp_server.connection.db_connection_map import DBConnectionMap, ConnectionMethod, DatabaseType
 from awslabs.postgres_mcp_server.connection.rds_api_connection import RDSDataAPIConnection
-from awslabs.postgres_mcp_server.connection.cp_api_connection import internal_get_cluster_properties, internal_create_serverless_cluster, internal_create_express_cluster, setup_aurora_iam_policy_for_current_user, internal_get_instance_properties
+from awslabs.postgres_mcp_server.connection.cp_api_connection import internal_get_cluster_properties, internal_create_serverless_cluster, setup_aurora_iam_policy_for_current_user, internal_get_instance_properties
 from awslabs.postgres_mcp_server.connection.psycopg_pool_connection import PsycopgPoolConnection
 from awslabs.postgres_mcp_server.connection.abstract_db_connection import AbstractDBConnection
 from awslabs.postgres_mcp_server.mutable_sql_detector import (
@@ -283,7 +283,7 @@ def connect_to_database(
         return str(llm_response)
 
     except Exception as e:
-        logger.error(f"internal_create_express_cluster failed with error: {str(e)}")
+        logger.error(f"connect_to_database failed with error: {str(e)}")
         trace_msg = traceback.format_exc()
         logger.error(f"Trace:{trace_msg}")
         llm_response = {
