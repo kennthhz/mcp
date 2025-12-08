@@ -322,6 +322,9 @@ def is_database_connected(
     if db_connection_map.get(ConnectionMethod.PG_WIRE_PROTOCOL, cluster_identifier, db_endpoint, database):
         return True
 
+    if db_connection_map.get(ConnectionMethod.PG_WIRE_IAM_PROTOCOL, cluster_identifier, db_endpoint, database):
+        return True
+
     return False
 
 @mcp.tool(
