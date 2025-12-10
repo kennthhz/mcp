@@ -57,6 +57,7 @@ query_comment_prohibited_key = 'The comment in query is prohibited because of in
 query_injection_risk_key = 'Your query contains risky injection patterns'
 readonly_query = True
 
+
 class DummyCtx:
     """A dummy context class for error handling in MCP tools."""
 
@@ -103,7 +104,8 @@ mcp = FastMCP(
     'pg-mcp MCP server. This is the starting point for all solutions created',
     dependencies=[
         'loguru',
-    ])
+    ],
+)
 
 
 @mcp.tool(name='run_query', description='Run a SQL query against PostgreSQL')
@@ -116,7 +118,8 @@ async def run_query(
     database: Annotated[str, Field(description='database name')],
     query_parameters: Annotated[
         Optional[List[Dict[str, Any]]], Field(description='Parameters for the SQL query')
-    ] = None) -> list[dict]:  # type: ignore
+    ] = None,
+) -> list[dict]:  # type: ignore
     """Run a SQL query against PostgreSQL.
 
     Args:
@@ -136,19 +139,24 @@ async def run_query(
     global write_query_prohibited_key
     global db_connection_map
 
-    logger.info(f'Entered run_query with '
-             f'method:{connection_method}, cluster_identifier:{cluster_identifier}, '
-             f'db_endpoint:{db_endpoint}, database:{database}, '
-             f'sql:{sql}')
+    logger.info(
+        f'Entered run_query with '
+        f'method:{connection_method}, cluster_identifier:{cluster_identifier}, '
+        f'db_endpoint:{db_endpoint}, database:{database}, '
+        f'sql:{sql}'
+    )
 
     db_connection = db_connection_map.get(
         method=connection_method,
         cluster_identifier=cluster_identifier,
         db_endpoint=db_endpoint,
-        database=database)
+        database=database,
+    )
     if not db_connection:
-        err = (f'No database connection available for method:{connection_method}, '
-               f'cluster_identifier:{cluster_identifier}, db_endpoint:{db_endpoint}, database:{database}')
+        err = (
+            f'No database connection available for method:{connection_method}, '
+            f'cluster_identifier:{cluster_identifier}, db_endpoint:{db_endpoint}, database:{database}'
+        )
         logger.error(err)
         await ctx.error(err)
         return [{'error': err}]
@@ -157,23 +165,33 @@ async def run_query(
         matches = detect_mutating_keywords(sql)
         if (bool)(matches):
             logger.info(
-                (f'query is rejected because current setting only allows readonly query.'
-                 f'detected keywords: {matches}, SQL query: {sql}'))
+                (
+                    f'query is rejected because current setting only allows readonly query.'
+                    f'detected keywords: {matches}, SQL query: {sql}'
+                )
+            )
             await ctx.error(write_query_prohibited_key)
             return [{'error': write_query_prohibited_key}]
 
     issues = check_sql_injection_risk(sql)
     if issues:
-        logger.info(f'query is rejected because it contains risky SQL pattern, SQL query: {sql}, reasons: {issues}')
-        await ctx.error(str({'message': 'Query parameter contains suspicious pattern', 'details': issues}))
+        logger.info(
+            f'query is rejected because it contains risky SQL pattern, SQL query: {sql}, reasons: {issues}'
+        )
+        await ctx.error(
+            str({'message': 'Query parameter contains suspicious pattern', 'details': issues})
+        )
         return [{'error': query_injection_risk_key}]
 
     try:
-        logger.info((
-            f"run_query: sql:{sql} method:{connection_method}, "
-            f"cluster_identifier:{cluster_identifier} database:{database} "
-            f"db_endpoint:{db_endpoint} "
-            f"readonly:{db_connection.readonly_query} query_parameters:{query_parameters}"))
+        logger.info(
+            (
+                f'run_query: sql:{sql} method:{connection_method}, '
+                f'cluster_identifier:{cluster_identifier} database:{database} '
+                f'db_endpoint:{db_endpoint} '
+                f'readonly:{db_connection.readonly_query} query_parameters:{query_parameters}'
+            )
+        )
 
         response = await db_connection.execute_query(sql, query_parameters)
 
@@ -192,16 +210,15 @@ async def run_query(
         return [{'error': unexpected_error_key}]
 
 
-@mcp.tool(
-    name='get_table_schema',
-    description='Fetch table columns and comments from Postgres')
+@mcp.tool(name='get_table_schema', description='Fetch table columns and comments from Postgres')
 async def get_table_schema(
     connection_method: Annotated[ConnectionMethod, Field(description='connection method')],
     cluster_identifier: Annotated[str, Field(description='Cluster identifier')],
     db_endpoint: Annotated[str, Field(description='database endpoint')],
     database: Annotated[str, Field(description='database name')],
     table_name: Annotated[str, Field(description='name of the table')],
-    ctx: Context) -> list[dict]:
+    ctx: Context,
+) -> list[dict]:
     """Get a table's schema information given the table name.
 
     Args:
@@ -215,8 +232,12 @@ async def get_table_schema(
     Returns:
         List of dictionary that contains query response rows
     """
-    logger.info((f"Entered get_table_schema: table_name:{table_name} connection_method:{connection_method}, "
-                f"cluster_identifier:{cluster_identifier}, db_endpoint:{db_endpoint}, database:{database}"))
+    logger.info(
+        (
+            f'Entered get_table_schema: table_name:{table_name} connection_method:{connection_method}, '
+            f'cluster_identifier:{cluster_identifier}, db_endpoint:{db_endpoint}, database:{database}'
+        )
+    )
 
     sql = """
         SELECT
@@ -234,14 +255,21 @@ async def get_table_schema(
 
     params = [{'name': 'table_name', 'value': {'stringValue': table_name}}]
 
-    return await run_query(sql=sql, ctx=ctx, connection_method = connection_method,
-                           cluster_identifier=cluster_identifier, db_endpoint= db_endpoint,
-                           database=database, query_parameters=params)
+    return await run_query(
+        sql=sql,
+        ctx=ctx,
+        connection_method=connection_method,
+        cluster_identifier=cluster_identifier,
+        db_endpoint=db_endpoint,
+        database=database,
+        query_parameters=params,
+    )
 
 
 @mcp.tool(
     name='connect_to_database',
-    description='Connect to a specific database and save the connection internally')
+    description='Connect to a specific database and save the connection internally',
+)
 def connect_to_database(
     region: Annotated[str, Field(description='region')],
     database_type: Annotated[DatabaseType, Field(description='database type')],
@@ -250,7 +278,10 @@ def connect_to_database(
     db_endpoint: Annotated[str, Field(description='database endpoint')],
     port: Annotated[int, Field(description='Postgres port')],
     database: Annotated[str, Field(description='database name')],
-    with_express_configuration: Annotated[bool, Field(description='with express configuration')] = False) -> str:
+    with_express_configuration: Annotated[
+        bool, Field(description='with express configuration')
+    ] = False,
+) -> str:
     """Connect to a specific database save the connection internally.
 
     Args:
@@ -286,29 +317,25 @@ def connect_to_database(
             db_endpoint=db_endpoint,
             port=port,
             database=database,
-            with_express_configuration=with_express_configuration
+            with_express_configuration=with_express_configuration,
         )
 
         return str(llm_response)
 
     except Exception as e:
-        logger.error(f"internal_create_express_cluster failed with error: {str(e)}")
+        logger.error(f'internal_create_express_cluster failed with error: {str(e)}')
         trace_msg = traceback.format_exc()
-        logger.error(f"Trace:{trace_msg}")
-        llm_response = {
-                "status":"Failed",
-                "error":str(e)
-            }
+        logger.error(f'Trace:{trace_msg}')
+        llm_response = {'status': 'Failed', 'error': str(e)}
         return json.dumps(llm_response, indent=2)
 
 
-@mcp.tool(
-    name='is_database_connected',
-    description='Check if a connection has been established')
+@mcp.tool(name='is_database_connected', description='Check if a connection has been established')
 def is_database_connected(
     cluster_identifier: Annotated[str, Field(description='cluster identifier')],
     db_endpoint: Annotated[str, Field(description='database endpoint')] = '',
-    database: Annotated[str, Field(description='database name')] = 'postgres')->bool:
+    database: Annotated[str, Field(description='database name')] = 'postgres',
+) -> bool:
     """Check if a connection has been established.
 
     Args:
@@ -323,18 +350,24 @@ def is_database_connected(
     if db_connection_map.get(ConnectionMethod.RDS_API, cluster_identifier, db_endpoint, database):
         return True
 
-    if db_connection_map.get(ConnectionMethod.PG_WIRE_PROTOCOL, cluster_identifier, db_endpoint, database):
+    if db_connection_map.get(
+        ConnectionMethod.PG_WIRE_PROTOCOL, cluster_identifier, db_endpoint, database
+    ):
         return True
 
-    if db_connection_map.get(ConnectionMethod.PG_WIRE_IAM_PROTOCOL, cluster_identifier, db_endpoint, database):
+    if db_connection_map.get(
+        ConnectionMethod.PG_WIRE_IAM_PROTOCOL, cluster_identifier, db_endpoint, database
+    ):
         return True
 
     return False
 
+
 @mcp.tool(
     name='get_database_connection_info',
-    description='Get all cached database connection information')
-def get_database_connection_info()->str:
+    description='Get all cached database connection information',
+)
+def get_database_connection_info() -> str:
     """Get all cached database connection information.
 
     Return:
@@ -344,15 +377,16 @@ def get_database_connection_info()->str:
     return db_connection_map.get_keys_json()
 
 
-@mcp.tool(
-    name='create_cluster',
-    description='Create an Aurora Postgres cluster')
+@mcp.tool(name='create_cluster', description='Create an Aurora Postgres cluster')
 def create_cluster(
     region: Annotated[str, Field(description='region')],
     cluster_identifier: Annotated[str, Field(description='cluster identifier')],
     database: Annotated[str, Field(description='default database name')] = 'postgres',
     engine_version: Annotated[str, Field(description='engine version')] = '17.5',
-    with_express_configuration: Annotated[bool, Field(description='with express configuration')] = False) -> str:
+    with_express_configuration: Annotated[
+        bool, Field(description='with express configuration')
+    ] = False,
+) -> str:
     """Create an RDS/Aurora cluster.
 
     Args:
@@ -365,11 +399,13 @@ def create_cluster(
     Returns:
         result
     """
-    logger.info(f'Entered create_cluster with region:{region}, '
-                f'cluster_identifier:{cluster_identifier} '
-                f'database:{database} '
-                f'engine_version:{engine_version} '
-                f'with_express_configuration:{with_express_configuration}')
+    logger.info(
+        f'Entered create_cluster with region:{region}, '
+        f'cluster_identifier:{cluster_identifier} '
+        f'database:{database} '
+        f'engine_version:{engine_version} '
+        f'with_express_configuration:{with_express_configuration}'
+    )
 
     database_type = DatabaseType.APG
     if with_express_configuration:
@@ -383,67 +419,79 @@ def create_cluster(
         properties = internal_get_cluster_properties(
             cluster_identifier=cluster_identifier,
             region=region,
-            with_express_configuration=with_express_configuration)
+            with_express_configuration=with_express_configuration,
+        )
 
         setup_aurora_iam_policy_for_current_user(
             db_user=properties['MasterUsername'],
             cluster_resource_id=properties['DbClusterResourceId'],
-            cluster_region=region)
+            cluster_region=region,
+        )
 
         internal_connect_to_database(
-            region = region,
-            database_type = database_type,
-            connection_method = connection_method,
+            region=region,
+            database_type=database_type,
+            connection_method=connection_method,
             cluster_identifier=cluster_identifier,
             db_endpoint=properties['Endpoint'],
             port=5432,
             database=database,
-            with_express_configuration=with_express_configuration)
+            with_express_configuration=with_express_configuration,
+        )
 
         result = {
-            "status":"Completed",
-            "cluster_identifier": cluster_identifier,
-            "db_endpoint":properties['Endpoint'],
-            "message":"Express cluster creation completed successfully"
+            'status': 'Completed',
+            'cluster_identifier': cluster_identifier,
+            'db_endpoint': properties['Endpoint'],
+            'message': 'Express cluster creation completed successfully',
         }
 
         return json.dumps(result, indent=2)
 
-
-    job_id = f"create-cluster-{cluster_identifier}-{datetime.now().isoformat(timespec='milliseconds')}"
+    job_id = (
+        f'create-cluster-{cluster_identifier}-{datetime.now().isoformat(timespec="milliseconds")}'
+    )
 
     try:
         async_job_status_lock.acquire()
-        async_job_status[job_id] = {"state":"pending", "result":None}
+        async_job_status[job_id] = {'state': 'pending', 'result': None}
     finally:
         async_job_status_lock.release()
 
     t = threading.Thread(
         target=create_cluster_worker,
-        args=(job_id, region, database_type, connection_method, cluster_identifier, engine_version, database),
-        daemon=False
+        args=(
+            job_id,
+            region,
+            database_type,
+            connection_method,
+            cluster_identifier,
+            engine_version,
+            database,
+        ),
+        daemon=False,
     )
     t.start()
 
-    logger.info(f"start_create_cluster_job return with job_id:{job_id}"
-                f"region:{region} cluster_identifier:{cluster_identifier} database:{database} "
-                f"engine_version:{engine_version} with_express_configuration: {with_express_configuration}")
+    logger.info(
+        f'start_create_cluster_job return with job_id:{job_id}'
+        f'region:{region} cluster_identifier:{cluster_identifier} database:{database} '
+        f'engine_version:{engine_version} with_express_configuration: {with_express_configuration}'
+    )
 
     result = {
-            "status": "Pending",
-            "message": "cluster creation started",
-            "job_id": job_id,
-            "cluster_identifier": cluster_identifier,
-            "check_status_tool": "get_job_status",
-            "next_action": f"Use get_job_status(job_id='{job_id}') to get results"
+        'status': 'Pending',
+        'message': 'cluster creation started',
+        'job_id': job_id,
+        'cluster_identifier': cluster_identifier,
+        'check_status_tool': 'get_job_status',
+        'next_action': f"Use get_job_status(job_id='{job_id}') to get results",
     }
 
     return json.dumps(result, indent=2)
 
 
-@mcp.tool(
-    name='get_job_status',
-    description='get background job status')
+@mcp.tool(name='get_job_status', description='get background job status')
 def get_job_status(job_id: str) -> dict:
     """Get background job status.
 
@@ -457,18 +505,20 @@ def get_job_status(job_id: str) -> dict:
 
     try:
         async_job_status_lock.acquire()
-        return async_job_status.get(job_id, {"state": "not_found"})
+        return async_job_status.get(job_id, {'state': 'not_found'})
     finally:
         async_job_status_lock.release()
 
+
 def create_cluster_worker(
-        job_id:str,
-        region:str,
-        database_type: DatabaseType,
-        connection_method: ConnectionMethod,
-        cluster_identifier:str,
-        engine_version:str,
-        database:str):
+    job_id: str,
+    region: str,
+    database_type: DatabaseType,
+    connection_method: ConnectionMethod,
+    cluster_identifier: str,
+    engine_version: str,
+    database: str,
+):
     """Background worker for cluster creation.
 
     Args:
@@ -487,36 +537,39 @@ def create_cluster_worker(
 
     try:
         cluster_result = internal_create_serverless_cluster(
-            region = region,
-            cluster_identifier = cluster_identifier,
-            engine_version = engine_version,
-            database_name = database)
+            region=region,
+            cluster_identifier=cluster_identifier,
+            engine_version=engine_version,
+            database_name=database,
+        )
 
         setup_aurora_iam_policy_for_current_user(
             db_user=cluster_result['MasterUsername'],
             cluster_resource_id=cluster_result['DbClusterResourceId'],
-            cluster_region=region)
+            cluster_region=region,
+        )
 
         internal_connect_to_database(
-            region = region,
-            database_type = database_type,
-            connection_method = connection_method,
+            region=region,
+            database_type=database_type,
+            connection_method=connection_method,
             cluster_identifier=cluster_identifier,
-            db_endpoint=cluster_result["Endpoint"],
+            db_endpoint=cluster_result['Endpoint'],
             port=5432,
-            database=database)
+            database=database,
+        )
 
         try:
             async_job_status_lock.acquire()
-            async_job_status[job_id]["state"] = "succeeded"
+            async_job_status[job_id]['state'] = 'succeeded'
         finally:
             async_job_status_lock.release()
     except Exception as e:
-        logger.error(f"create_cluster_worker failed with {e}")
+        logger.error(f'create_cluster_worker failed with {e}')
         try:
             async_job_status_lock.acquire()
-            async_job_status[job_id]["state"] = "failed"
-            async_job_status[job_id]["result"] = str(e)
+            async_job_status[job_id]['state'] = 'failed'
+            async_job_status[job_id]['result'] = str(e)
         finally:
             async_job_status_lock.release()
 
@@ -529,7 +582,10 @@ def internal_connect_to_database(
     db_endpoint: Annotated[str, Field(description='database endpoint')],
     port: Annotated[int, Field(description='Postgres port')],
     database: Annotated[str, Field(description='database name')] = 'postgres',
-    with_express_configuration: Annotated[bool, Field(description='with express configuration')] = False) -> Tuple:
+    with_express_configuration: Annotated[
+        bool, Field(description='with express configuration')
+    ] = False,
+) -> Tuple:
     """Connect to a specific database save the connection internally.
 
     Args:
@@ -545,15 +601,17 @@ def internal_connect_to_database(
     global db_connection_map
     global readonly_query
 
-    logger.info(f'Enter internal_connect_to_database\n'
-                f'region:{region}\n'
-                f'database_type:{database_type}\n'
-                f'connection_method:{connection_method}\n'
-                f'cluster_identifier:{cluster_identifier}\n'
-                f'db_endpoint:{db_endpoint}\n'
-                f'database:{database}\n'
-                f'readonly_query:{readonly_query}\n'
-                f'with_express_configuration:{with_express_configuration}')
+    logger.info(
+        f'Enter internal_connect_to_database\n'
+        f'region:{region}\n'
+        f'database_type:{database_type}\n'
+        f'connection_method:{connection_method}\n'
+        f'cluster_identifier:{cluster_identifier}\n'
+        f'db_endpoint:{db_endpoint}\n'
+        f'database:{database}\n'
+        f'readonly_query:{readonly_query}\n'
+        f'with_express_configuration:{with_express_configuration}'
+    )
 
     if not region:
         raise ValueError("region can't be none or empty")
@@ -567,60 +625,68 @@ def internal_connect_to_database(
     if database_type == DatabaseType.APG and not cluster_identifier:
         raise ValueError("cluster_identifier can't be none or empty for Aurora Postgres Database")
 
-    existing_conn = db_connection_map.get(connection_method, cluster_identifier, db_endpoint, database, port)
+    existing_conn = db_connection_map.get(
+        connection_method, cluster_identifier, db_endpoint, database, port
+    )
     if existing_conn:
-        llm_response = json.dumps({
-                "connection_method": connection_method,
-                "cluster_identifier": cluster_identifier,
-                "db_endpoint": db_endpoint,
-                "database" : database,
-                "port": port
-            }, indent=2, default=str)
+        llm_response = json.dumps(
+            {
+                'connection_method': connection_method,
+                'cluster_identifier': cluster_identifier,
+                'db_endpoint': db_endpoint,
+                'database': database,
+                'port': port,
+            },
+            indent=2,
+            default=str,
+        )
         return (existing_conn, llm_response)
 
-    enable_data_api:bool = False
-    masteruser:str = ''
-    cluster_arn:str = ''
-    secret_arn:str = ''
-    with_express_config:bool = False
+    enable_data_api: bool = False
+    masteruser: str = ''
+    cluster_arn: str = ''
+    secret_arn: str = ''
+    with_express_config: bool = False
 
     if cluster_identifier:
         # Can be either APG (APG always requires cluster) or RPG multi-AZ cluster deployment case
         cluster_properties = internal_get_cluster_properties(
             cluster_identifier=cluster_identifier,
             region=region,
-            with_express_configuration=with_express_configuration)
+            with_express_configuration=with_express_configuration,
+        )
 
-        enable_data_api = cluster_properties.get("HttpEndpointEnabled", False)
-        masteruser = cluster_properties.get("MasterUsername", '')
-        cluster_arn = cluster_properties.get("DBClusterArn", '')
-        secret_arn = cluster_properties.get("MasterUserSecret", {}).get("SecretArn")
+        enable_data_api = cluster_properties.get('HttpEndpointEnabled', False)
+        masteruser = cluster_properties.get('MasterUsername', '')
+        cluster_arn = cluster_properties.get('DBClusterArn', '')
+        secret_arn = cluster_properties.get('MasterUserSecret', {}).get('SecretArn')
 
         if not db_endpoint:
             # if db_endpoint not set, we will use cluster's endpoint
-            db_endpoint = cluster_properties.get("Endpoint", '')
-            port = int(cluster_properties.get("Port", ''))
+            db_endpoint = cluster_properties.get('Endpoint', '')
+            port = int(cluster_properties.get('Port', ''))
     else:
         # Must be RPG instance only deployment case (i.e. without cluster)
         instance_properties = internal_get_instance_properties(db_endpoint, region)
-        masteruser = instance_properties.get("MasterUsername", '')
-        secret_arn = instance_properties.get("MasterUserSecret", {}).get("SecretArn")
+        masteruser = instance_properties.get('MasterUsername', '')
+        secret_arn = instance_properties.get('MasterUserSecret', {}).get('SecretArn')
         port = int(instance_properties.get('Endpoint', {}).get('Port'))
 
-    logger.info(f"About to create internal DB connections with:"
-        f"enable_data_api:{enable_data_api}\n"
-        f"masteruser:{masteruser}\n"
-        f"cluster_arn:{cluster_arn}\n"
-        f"secret_arn:{secret_arn}\n"
-        f"db_endpoint:{db_endpoint}\n"
-        f"port:{port}\n"
-        f"with_express_config:{with_express_config}\n"
-        f"region:{region}\n"
-        f"readonly:{readonly_query}")
+    logger.info(
+        f'About to create internal DB connections with:'
+        f'enable_data_api:{enable_data_api}\n'
+        f'masteruser:{masteruser}\n'
+        f'cluster_arn:{cluster_arn}\n'
+        f'secret_arn:{secret_arn}\n'
+        f'db_endpoint:{db_endpoint}\n'
+        f'port:{port}\n'
+        f'with_express_config:{with_express_config}\n'
+        f'region:{region}\n'
+        f'readonly:{readonly_query}'
+    )
 
     db_connection = None
-    if  connection_method == ConnectionMethod.PG_WIRE_IAM_PROTOCOL:
-
+    if connection_method == ConnectionMethod.PG_WIRE_IAM_PROTOCOL:
         db_connection = PsycopgPoolConnection(
             host=db_endpoint,
             port=port,
@@ -629,7 +695,8 @@ def internal_connect_to_database(
             secret_arn='',
             db_user=masteruser,
             region=region,
-            is_iam_auth=True)
+            is_iam_auth=True,
+        )
 
     elif connection_method == ConnectionMethod.RDS_API:
         db_connection = RDSDataAPIConnection(
@@ -637,7 +704,8 @@ def internal_connect_to_database(
             secret_arn=str(secret_arn),
             database=database,
             region=region,
-            readonly=readonly_query)
+            readonly=readonly_query,
+        )
     else:
         # must be connection_method == ConnectionMethod.PG_WIRE_PROTOCOL
         db_connection = PsycopgPoolConnection(
@@ -648,20 +716,28 @@ def internal_connect_to_database(
             secret_arn=secret_arn,
             db_user='',
             region=region,
-            is_iam_auth=False)
+            is_iam_auth=False,
+        )
 
     if db_connection:
-        db_connection_map.set(connection_method, cluster_identifier, db_endpoint, database, db_connection)
-        llm_response = json.dumps({
-                "connection_method": connection_method,
-                "cluster_identifier": cluster_identifier,
-                "db_endpoint": db_endpoint,
-                "database" : database,
-                "port": port
-            }, indent=2, default=str)
+        db_connection_map.set(
+            connection_method, cluster_identifier, db_endpoint, database, db_connection
+        )
+        llm_response = json.dumps(
+            {
+                'connection_method': connection_method,
+                'cluster_identifier': cluster_identifier,
+                'db_endpoint': db_endpoint,
+                'database': database,
+                'port': port,
+            },
+            indent=2,
+            default=str,
+        )
         return (db_connection, llm_response)
 
     raise ValueError("Can't create connection because invalid input parameter combination")
+
 
 def main():
     """Main entry point for the MCP server application.
@@ -675,25 +751,32 @@ def main():
         description='An AWS Labs Model Context Protocol (MCP) server for postgres'
     )
 
-    parser.add_argument('--connection_method', help='Connection method to the database. It can be RDS_API, PG_WIRE_PROTOCOL OR PG_WIRE_IAM_PROTOCOL)')
+    parser.add_argument(
+        '--connection_method',
+        help='Connection method to the database. It can be RDS_API, PG_WIRE_PROTOCOL OR PG_WIRE_IAM_PROTOCOL)',
+    )
     parser.add_argument('--db_cluster_arn', help='ARN of the RDS or Aurora Postgres cluster')
     parser.add_argument('--db_type', help='APG for Aurora Postgres or RPG for RDS Postgres')
     parser.add_argument('--db_endpoint', help='Instance endpoint address')
     parser.add_argument('--region', help='AWS region')
-    parser.add_argument('--allow_write_query', action='store_true', help='Enforce readonly SQL statements')
+    parser.add_argument(
+        '--allow_write_query', action='store_true', help='Enforce readonly SQL statements'
+    )
     parser.add_argument('--database', help='Database name')
     parser.add_argument('--port', type=int, default=5432, help='Database port (default: 5432)')
     args = parser.parse_args()
 
-    logger.info(f"MCP configuration:\n"
-                f"db_type:{args.db_type}\n"
-                f"db_cluster_arn:{args.db_cluster_arn}\n"
-                f"connection_method:{args.connection_method}\n"
-                f"db_endpoint:{args.db_endpoint}\n"
-                f"region:{args.region}\n"
-                f"allow_write_query:{args.allow_write_query}\n"
-                f"database:{args.database}\n"
-                f"port:{args.port}\n")
+    logger.info(
+        f'MCP configuration:\n'
+        f'db_type:{args.db_type}\n'
+        f'db_cluster_arn:{args.db_cluster_arn}\n'
+        f'connection_method:{args.connection_method}\n'
+        f'db_endpoint:{args.db_endpoint}\n'
+        f'region:{args.region}\n'
+        f'allow_write_query:{args.allow_write_query}\n'
+        f'database:{args.database}\n'
+        f'port:{args.port}\n'
+    )
 
     readonly_query = not args.allow_write_query
 
@@ -702,7 +785,7 @@ def main():
             # Create the appropriate database connection based on the provided parameters
             db_connection: Optional[AbstractDBConnection] = None
 
-            cluster_identifier = args.db_cluster_arn.split(":")[-1]
+            cluster_identifier = args.db_cluster_arn.split(':')[-1]
             db_connection, llm_response = internal_connect_to_database(
                 region=args.region,
                 database_type=DatabaseType[args.db_type],
@@ -710,13 +793,22 @@ def main():
                 cluster_identifier=cluster_identifier,
                 db_endpoint=args.hostname,
                 port=args.port,
-                database=args.database)
+                database=args.database,
+            )
 
             # Test database connection
             if db_connection:
                 ctx = DummyCtx()
-                response = asyncio.run(run_query('SELECT 1', ctx,
-                    ConnectionMethod[args.connection_method], cluster_identifier, args.db_endpoint, args.database))
+                response = asyncio.run(
+                    run_query(
+                        'SELECT 1',
+                        ctx,
+                        ConnectionMethod[args.connection_method],
+                        cluster_identifier,
+                        args.db_endpoint,
+                        args.database,
+                    )
+                )
                 if (
                     isinstance(response, list)
                     and len(response) == 1
@@ -730,12 +822,12 @@ def main():
                 else:
                     logger.success('Successfully validated database connection to Postgres')
 
-
         logger.info('Postgres MCP server started')
         mcp.run()
         logger.info('Postgres MCP server stopped')
     finally:
         db_connection_map.close_all()
+
 
 if __name__ == '__main__':
     main()

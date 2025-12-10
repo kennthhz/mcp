@@ -113,7 +113,7 @@ class TestRDSDataAPIConnection:
         mock_client = MagicMock()
         mock_client.execute_statement.return_value = {
             'columnMetadata': [{'name': 'result'}],
-            'records': [[{'longValue': 1}]]
+            'records': [[{'longValue': 1}]],
         }
         rds_connection.data_client = mock_client
 
@@ -140,7 +140,7 @@ class TestRDSDataAPIConnection:
         mock_client = MagicMock()
         mock_client.execute_statement.return_value = {
             'columnMetadata': [{'name': 'name'}],
-            'records': [[{'stringValue': 'test'}]]
+            'records': [[{'stringValue': 'test'}]],
         }
         rds_connection.data_client = mock_client
 
@@ -194,7 +194,7 @@ class TestRDSDataAPIConnection:
         mock_client.begin_transaction.return_value = {'transactionId': 'tx-456'}
         mock_client.execute_statement.return_value = {
             'columnMetadata': [{'name': 'name'}],
-            'records': [[{'stringValue': 'test'}]]
+            'records': [[{'stringValue': 'test'}]],
         }
         rds_connection_readonly.data_client = mock_client
 
@@ -215,7 +215,7 @@ class TestRDSDataAPIConnection:
         mock_client.begin_transaction.return_value = {'transactionId': 'tx-789'}
         mock_client.execute_statement.side_effect = [
             None,  # SET TRANSACTION READ ONLY succeeds
-            Exception('Query failed')  # Actual query fails
+            Exception('Query failed'),  # Actual query fails
         ]
         rds_connection_readonly.data_client = mock_client
 
@@ -246,7 +246,7 @@ class TestRDSDataAPIConnection:
         mock_client = MagicMock()
         mock_client.execute_statement.return_value = {
             'columnMetadata': [{'name': 'result'}],
-            'records': [[{'longValue': 1}]]
+            'records': [[{'longValue': 1}]],
         }
         rds_connection.data_client = mock_client
 
@@ -274,7 +274,7 @@ class TestRDSDataAPIConnection:
         mock_client = MagicMock()
         mock_client.execute_statement.return_value = {
             'columnMetadata': [{'name': 'result'}],
-            'records': []
+            'records': [],
         }
         rds_connection.data_client = mock_client
 

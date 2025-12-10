@@ -41,7 +41,7 @@ class TestRunQueryErrorHandling:
                 connection_method=ConnectionMethod.RDS_API,
                 cluster_identifier='test-cluster',
                 db_endpoint='test.endpoint.com',
-                database='testdb'
+                database='testdb',
             )
 
             assert isinstance(result, list)
@@ -57,7 +57,7 @@ class TestRunQueryErrorHandling:
         mock_connection.readonly_query = False
         mock_connection.execute_query.return_value = {
             'columnMetadata': [{'name': 'result'}],
-            'records': [[{'longValue': 42}]]
+            'records': [[{'longValue': 42}]],
         }
 
         with patch('awslabs.postgres_mcp_server.server.db_connection_map') as mock_map:
@@ -71,14 +71,13 @@ class TestRunQueryErrorHandling:
                 cluster_identifier='test-cluster',
                 db_endpoint='test.endpoint.com',
                 database='testdb',
-                query_parameters=parameters
+                query_parameters=parameters,
             )
 
             assert len(result) == 1
             assert result[0]['result'] == 42
             mock_connection.execute_query.assert_called_once_with(
-                'SELECT * FROM users WHERE id = :id',
-                parameters
+                'SELECT * FROM users WHERE id = :id', parameters
             )
 
 
@@ -87,7 +86,9 @@ class TestConnectToDatabaseErrorHandling:
 
     def test_connect_to_database_exception_handling(self):
         """Test connect_to_database handles exceptions properly."""
-        with patch('awslabs.postgres_mcp_server.server.internal_connect_to_database') as mock_connect:
+        with patch(
+            'awslabs.postgres_mcp_server.server.internal_connect_to_database'
+        ) as mock_connect:
             mock_connect.side_effect = ValueError('Connection failed')
 
             result = connect_to_database(
@@ -98,7 +99,7 @@ class TestConnectToDatabaseErrorHandling:
                 db_endpoint='test.endpoint.com',
                 port=5432,
                 database='testdb',
-                with_express_configuration=False
+                with_express_configuration=False,
             )
 
             result_dict = json.loads(result)
@@ -113,10 +114,12 @@ class TestConnectToDatabaseErrorHandling:
             'cluster_identifier': 'test-cluster',
             'db_endpoint': 'test.endpoint.com',
             'database': 'testdb',
-            'port': 5432
+            'port': 5432,
         }
 
-        with patch('awslabs.postgres_mcp_server.server.internal_connect_to_database') as mock_connect:
+        with patch(
+            'awslabs.postgres_mcp_server.server.internal_connect_to_database'
+        ) as mock_connect:
             mock_connect.return_value = (mock_connection, json.dumps(mock_response))
 
             result = connect_to_database(
@@ -127,7 +130,7 @@ class TestConnectToDatabaseErrorHandling:
                 db_endpoint='test.endpoint.com',
                 port=5432,
                 database='testdb',
-                with_express_configuration=False
+                with_express_configuration=False,
             )
 
             assert 'test-cluster' in result
@@ -142,5 +145,5 @@ class TestDummyCtx:
         """Test that DummyCtx.error() completes without raising."""
         ctx = DummyCtx()
         # Should not raise any exception
-        await ctx.error("Test error message")
+        await ctx.error('Test error message')
         # If we get here, test passes
