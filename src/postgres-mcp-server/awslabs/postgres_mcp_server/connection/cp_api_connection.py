@@ -16,39 +16,32 @@ import boto3
 import json
 import time
 import traceback
+from awslabs.postgres_mcp_server import __user_agent__
+from botocore.config import Config
 from botocore.exceptions import ClientError
 from loguru import logger
 from typing import Any, Dict, Optional
 
 
 def internal_create_rds_client(region: str, with_express_configuration: bool):
-    """Create an RDS client with optional express configuration.
-
-    Args:
-        region: AWS region for the client
-        with_express_configuration: Whether to use express configuration
-
-    Returns:
-        boto3 RDS client instance
-    """
+    """Create an RDS client with custom user agent configuration and optional express configuration."""
     if with_express_configuration:
         region = 'us-east-2'
         endpoint_url = f'https://rds-preview.{region}.amazonaws.com'
-        return boto3.client('rds', region_name=region, endpoint_url=endpoint_url)
+        return boto3.client(
+            'rds',
+            region_name=region,
+            endpoint_url=endpoint_url,
+            config=Config(user_agent_extra=__user_agent__),
+        )
     else:
-        return boto3.client('rds', region_name=region)
+        return boto3.client(
+            'rds', region_name=region, config=Config(user_agent_extra=__user_agent__)
+        )
 
 
 def internal_get_instance_properties(target_endpoint: str, region: str) -> Dict[str, Any]:
-    """Get RDS instance properties by endpoint.
-
-    Args:
-        target_endpoint: The endpoint to search for
-        region: AWS region to search in
-
-    Returns:
-        Dict containing instance properties, or None if not found
-    """
+    """Retrieve RDS instance properties from AWS."""
     rds_client = internal_create_rds_client(region=region, with_express_configuration=False)
     paginator = rds_client.get_paginator('describe_db_instances')
 
@@ -386,8 +379,8 @@ def setup_aurora_iam_policy_for_current_user(
         raise ValueError('cluster_region must be a non-empty string')
 
     # Initialize clients
-    sts = boto3.client('sts')
-    iam = boto3.client('iam')
+    sts = boto3.client('sts', config=Config(user_agent_extra=__user_agent__))
+    iam = boto3.client('iam', config=Config(user_agent_extra=__user_agent__))
 
     # 1. Get current IAM identity
     try:

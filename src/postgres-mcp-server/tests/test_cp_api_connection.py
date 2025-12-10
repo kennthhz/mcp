@@ -9,7 +9,7 @@ from awslabs.postgres_mcp_server.connection.cp_api_connection import (
 )
 from botocore.exceptions import ClientError, WaiterError
 from typing import Dict, List, Optional
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 
 # =============================================================================
@@ -162,7 +162,7 @@ class TestInternalCreateRdsClient:
         """Test creating standard RDS client."""
         internal_create_rds_client(region='us-west-2', with_express_configuration=False)
 
-        mock_boto3_client.assert_called_once_with('rds', region_name='us-west-2')
+        mock_boto3_client.assert_called_once_with('rds', region_name='us-west-2', config=ANY)
 
     @patch('awslabs.postgres_mcp_server.connection.cp_api_connection.boto3.client')
     def test_create_rds_client_with_express(self, mock_boto3_client):
@@ -174,6 +174,7 @@ class TestInternalCreateRdsClient:
             'rds',
             region_name='us-east-2',
             endpoint_url='https://rds-preview.us-east-2.amazonaws.com',
+            config=ANY,
         )
 
 
@@ -438,7 +439,7 @@ class TestInternalCreateServerlessCluster:
         assert 'SecretArn' in result['MasterUserSecret']
 
         # Verify boto3.client was called correctly
-        mock_boto3_client.assert_called_once_with('rds', region_name='us-east-1')
+        mock_boto3_client.assert_called_once_with('rds', region_name='us-east-1', config=ANY)
 
         # Verify create_db_cluster was called with correct params
         mock_rds_client.create_db_cluster.assert_called_once()

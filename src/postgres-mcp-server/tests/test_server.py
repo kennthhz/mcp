@@ -1051,7 +1051,13 @@ def test_is_database_connected_true():
     """Test is_database_connected when connection exists."""
     # Add a mock connection
     mock_conn = Mock_DBConnection(readonly=False)
-    db_connection_map.set(ConnectionMethod.RDS_API, 'test-cluster', '', 'test-db', mock_conn)
+    db_connection_map.set(
+        ConnectionMethod.RDS_API,
+        'test-cluster',
+        '',
+        'test-db',
+        mock_conn,  # type: ignore
+    )
 
     result = is_database_connected(
         cluster_identifier='test-cluster', db_endpoint='', database='test-db'
@@ -1071,7 +1077,7 @@ def test_is_database_connected_with_endpoint():
         'test-cluster',
         'test-endpoint.amazonaws.com',
         'test-db',
-        mock_conn,
+        mock_conn,  # type: ignore
     )
 
     # Test with matching endpoint

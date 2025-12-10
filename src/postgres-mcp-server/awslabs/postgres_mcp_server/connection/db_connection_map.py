@@ -103,7 +103,7 @@ class DBConnectionMap:
                 )
 
     def get_keys_json(self) -> str:
-        """Get connection keys as JSON string."""
+        """Get all connection keys as JSON string."""
         entries: List[dict] = []
         with self._lock:
             for key in self.map.keys():

@@ -287,10 +287,10 @@ def connect_to_database(
     Args:
         region: region of the database. Required parametere.
         database_type: Either APG for Aurora Postgres or RPG for RDS Postgres cluster. Required parameter
-        connection_method: Either RDS_API, IAM, or PG_AUTH. Required parameter
+        connection_method: Either RDS_API, PG_WIRE_PROTOCOL, or PG_WIRE_IAM_PROTOCOL. Required parameter
         cluster_identifier: Either Aurora Postgres cluster identifier or RDS Postgres cluster identifier
         db_endpoint: database endpoint
-        port: database port number
+        port: database port
         database: database name. Required parameter
         with_express_configuration: if the database is associated express configuration
 
@@ -323,7 +323,7 @@ def connect_to_database(
         return str(llm_response)
 
     except Exception as e:
-        logger.error(f'internal_create_express_cluster failed with error: {str(e)}')
+        logger.error(f'connect_to_database failed with error: {str(e)}')
         trace_msg = traceback.format_exc()
         logger.error(f'Trace:{trace_msg}')
         llm_response = {'status': 'Failed', 'error': str(e)}
@@ -590,11 +590,11 @@ def internal_connect_to_database(
 
     Args:
         region: region
-        database_type: Database type (APG or RPG)
-        connection_method: Connection method (RDS_API, PG_WIRE_PROTOCOL, etc.)
+        database_type: database type (APG or RPG)
+        connection_method: connection method (RDS_API, PG_WIRE_PROTOCOL, or PG_WIRE_IAM_PROTOCOL)
         cluster_identifier: cluster identifier
         db_endpoint: database endpoint
-        port: database port number
+        port: database port
         database: database name
         with_express_configuration: if the database is associated express configuration
     """
