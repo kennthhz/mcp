@@ -1,4 +1,5 @@
 import pytest
+from awslabs.postgres_mcp_server.connection.abstract_db_connection import AbstractDBConnection
 from botocore.exceptions import ClientError
 from enum import Enum
 from typing import Any, Dict, List, Optional
@@ -158,7 +159,7 @@ class Mock_boto3_client:
         self._responses.append(response)
 
 
-class Mock_DBConnection:
+class Mock_DBConnection(AbstractDBConnection):
     """Mock implementation of DBConnection for testing purposes."""
 
     def __init__(self, readonly, error: MockException = MockException.No):
@@ -168,6 +169,7 @@ class Mock_DBConnection:
             readonly: Whether the connection should be read-only
             error: Mock exception if any
         """
+        super().__init__(readonly)
         self.cluster_arn = 'dummy_cluster_arn'
         self.secret_arn = 'dummy_secret_arn'  # pragma: allowlist secret
         self.database = 'dummy_database'
@@ -244,6 +246,20 @@ class Mock_DBConnection:
         else:
             # Execute the query directly
             return self.data_client.execute_statement(sql=sql, parameters=parameters)
+
+    async def close(self) -> None:
+        """Close the database connection."""
+        # Mock implementation - do nothing
+        pass
+
+    async def check_connection_health(self) -> bool:
+        """Check if the database connection is healthy.
+
+        Returns:
+            bool: True if the connection is healthy, False otherwise
+        """
+        # Mock implementation - always return True unless there's an error
+        return self.error == MockException.No
 
 
 class DummyCtx:

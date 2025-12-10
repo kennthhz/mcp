@@ -21,13 +21,14 @@ import pytest
 import sys
 import time
 import uuid
+from awslabs.postgres_mcp_server.connection.db_connection_map import (
+    ConnectionMethod,
+)
 from awslabs.postgres_mcp_server.connection.psycopg_pool_connection import PsycopgPoolConnection
-from awslabs.postgres_mcp_server.connection.db_connection_map import DBConnectionMap, ConnectionMethod
 from awslabs.postgres_mcp_server.server import (
     async_job_status,
     async_job_status_lock,
     client_error_code_key,
-    connect_to_database,
     create_cluster,
     db_connection_map,
     get_database_connection_info,
@@ -510,13 +511,13 @@ async def test_run_query_well_formatted_response():
 
     # Response for the query itself
     mock_db_connection.data_client.add_mock_response(get_mock_normal_query_response())
-    
+
     # Store connection in the global db_connection_map
     setup_mock_connection(mock_db_connection)
-    
+
     tool_response = await run_query(
-        sql_text, 
-        ctx, 
+        sql_text,
+        ctx,
         ConnectionMethod.RDS_API,
         'test-cluster',
         'test-endpoint',
@@ -548,8 +549,8 @@ async def test_run_query_safe_read_queries_on_redonly_settings():
         # Response for the query itself
         mock_db_connection.data_client.add_mock_response(get_mock_normal_query_response())
         tool_response = await run_query(
-            sql_text, 
-            ctx, 
+            sql_text,
+            ctx,
             ConnectionMethod.RDS_API,
             'test-cluster',
             'test-endpoint',
@@ -577,8 +578,8 @@ async def test_run_query_risky_queries_without_parameters():
     for sql_text in RISKY_QUERY_WITHOUT_PARAMETERS:
         ctx = DummyCtx()
         response = await run_query(
-            sql_text, 
-            ctx, 
+            sql_text,
+            ctx,
             ConnectionMethod.RDS_API,
             'test-cluster',
             'test-endpoint',
@@ -595,8 +596,8 @@ async def test_run_query_risky_queries_without_parameters():
     for sql_text in RISKY_QUERY_WITHOUT_PARAMETERS:
         ctx = DummyCtx()
         response = await run_query(
-            sql_text, 
-            ctx, 
+            sql_text,
+            ctx,
             ConnectionMethod.RDS_API,
             'test-cluster',
             'test-endpoint',
@@ -616,8 +617,8 @@ async def test_run_query_throw_client_error():
 
     ctx = DummyCtx()
     response = await run_query(
-        sql_text, 
-        ctx, 
+        sql_text,
+        ctx,
         ConnectionMethod.RDS_API,
         'test-cluster',
         'test-endpoint',
@@ -639,8 +640,8 @@ async def test_run_query_throw_unexpected_error():
 
     ctx = DummyCtx()
     response = await run_query(
-        sql_text, 
-        ctx, 
+        sql_text,
+        ctx,
         ConnectionMethod.RDS_API,
         'test-cluster',
         'test-endpoint',
@@ -664,8 +665,8 @@ async def test_run_query_write_queries_on_readonly_setting():
     for sql_text in MUTATING_QUERIES:
         ctx = DummyCtx()
         response = await run_query(
-            sql_text, 
-            ctx, 
+            sql_text,
+            ctx,
             ConnectionMethod.RDS_API,
             'test-cluster',
             'test-endpoint',
@@ -694,8 +695,8 @@ async def test_run_query_write_queries_on_write_allowed_setting():
         mock_db_connection.data_client.add_mock_response(get_mock_normal_query_response())
 
         tool_response = await run_query(
-            sql_text, 
-            ctx, 
+            sql_text,
+            ctx,
             ConnectionMethod.RDS_API,
             'test-cluster',
             'test-endpoint',
@@ -773,14 +774,14 @@ def test_main_with_valid_parameters(monkeypatch, capsys):
     mock_connection = Mock_DBConnection(readonly=False)
     # Add mock response for the validation query
     mock_connection.data_client.add_mock_response(get_mock_normal_query_response())
-    
+
     # Store connection in map and mock the internal_connect_to_database function
     db_connection_map.set(
         ConnectionMethod.RDS_API,
         'example-cluster-name',
-        None,
+        '',
         'postgres',
-        mock_connection
+        mock_connection,  # type: ignore
     )
 
     # This test of main() will succeed in parsing parameters and create connection object.
@@ -839,12 +840,12 @@ async def test_run_query_with_psycopg_connection():
     ctx = DummyCtx()
 
     tool_response = await run_query(
-        sql_text, 
-        ctx, 
+        sql_text,
+        ctx,
         ConnectionMethod.PG_WIRE_PROTOCOL,
         'test-cluster',
         'test-endpoint',
-        'test-db'
+        'test-db',
     )
 
     # validate tool_response
@@ -889,7 +890,10 @@ def test_main_with_psycopg_parameters(monkeypatch, capsys):
         database,
         readonly,
         secret_arn,
+        db_user,
         region,
+        is_iam_auth=False,
+        pool_expiry_min=30,
         min_size=1,
         max_size=10,
         is_test=False,
@@ -902,7 +906,10 @@ def test_main_with_psycopg_parameters(monkeypatch, capsys):
             database,
             readonly,
             secret_arn,
+            db_user,
             region,
+            is_iam_auth,
+            pool_expiry_min,
             min_size,
             max_size,
             is_test=True,
@@ -1008,7 +1015,7 @@ def test_get_database_connection_info_empty():
     """Test get_database_connection_info with no connections."""
     # Clear the map
     db_connection_map.close_all()
-    
+
     result = get_database_connection_info()
     assert isinstance(result, str)
     connections = json.loads(result)
@@ -1024,15 +1031,15 @@ def test_get_database_connection_info_with_connections():
         'test-cluster',
         'test-endpoint',
         'test-db',
-        mock_conn
+        mock_conn,  # type: ignore
     )
-    
+
     result = get_database_connection_info()
     assert isinstance(result, str)
     connections = json.loads(result)
     assert isinstance(connections, list)
     assert len(connections) >= 1
-    
+
     # Verify connection info structure
     found = False
     for conn in connections:
@@ -1041,8 +1048,8 @@ def test_get_database_connection_info_with_connections():
             assert conn['db_endpoint'] == 'test-endpoint'
             found = True
             break
-    assert found, "Test connection not found in connection info"
-    
+    assert found, 'Test connection not found in connection info'
+
     # Cleanup
     db_connection_map.close_all()
 
@@ -1066,12 +1073,12 @@ def test_get_job_status_existing_job():
         }
     finally:
         async_job_status_lock.release()
-    
+
     result = get_job_status(test_job_id)
     assert isinstance(result, dict)
     assert result['state'] == 'completed'
     assert result['result']['status'] == 'success'
-    
+
     # Cleanup
     try:
         async_job_status_lock.acquire()
@@ -1084,7 +1091,7 @@ def test_is_database_connected_false():
     """Test is_database_connected when no connection exists."""
     # Clear connections
     db_connection_map.close_all()
-    
+
     result = is_database_connected(
         cluster_identifier='non-existent',
         db_endpoint='',
@@ -1104,14 +1111,14 @@ def test_is_database_connected_true():
         'test-db',
         mock_conn
     )
-    
+
     result = is_database_connected(
         cluster_identifier='test-cluster',
         db_endpoint='',
         database='test-db'
     )
     assert result is True
-    
+
     # Cleanup
     db_connection_map.close_all()
 
@@ -1127,7 +1134,7 @@ def test_is_database_connected_with_endpoint():
         'test-db',
         mock_conn
     )
-    
+
     # Test with matching endpoint
     result = is_database_connected(
         cluster_identifier='test-cluster',
@@ -1135,7 +1142,7 @@ def test_is_database_connected_with_endpoint():
         database='test-db'
     )
     assert result is True
-    
+
     # Test with non-matching endpoint
     result = is_database_connected(
         cluster_identifier='test-cluster',
@@ -1143,7 +1150,7 @@ def test_is_database_connected_with_endpoint():
         database='test-db'
     )
     assert result is False
-    
+
     # Cleanup
     db_connection_map.close_all()
 
@@ -1165,7 +1172,7 @@ async def test_create_cluster_express():
                     }
                     mock_conn = Mock_DBConnection(readonly=False)
                     mock_connect.return_value = (mock_conn, "Connected successfully")
-                    
+
                     result = create_cluster(
                         region='us-east-2',
                         cluster_identifier='test-express-cluster',
@@ -1173,14 +1180,14 @@ async def test_create_cluster_express():
                         engine_version='15.3',
                         with_express_configuration=True
                     )
-                    
+
                     # Express cluster returns immediately with status
                     assert isinstance(result, str)
                     result_dict = json.loads(result)
                     assert result_dict['status'] == 'Completed'
                     assert result_dict['cluster_identifier'] == 'test-express-cluster'
                     assert 'db_endpoint' in result_dict
-                    
+
                     # Verify the mocks were called
                     mock_create.assert_called_once()
                     mock_get_props.assert_called_once()
@@ -1192,12 +1199,12 @@ async def test_create_cluster_express():
 async def test_create_cluster_serverless():
     """Test create_cluster function for serverless cluster creation."""
     # Mock the internal_create_serverless_cluster function
-    with patch('awslabs.postgres_mcp_server.server.internal_create_serverless_cluster') as mock_create:
+    with patch('awslabs.postgres_mcp_server.server.internal_create_serverless_cluster'):
         with patch('awslabs.postgres_mcp_server.server.internal_get_cluster_properties') as mock_get_props:
             mock_get_props.return_value = {
                 'DBClusterArn': 'arn:aws:rds:us-west-2:123456789012:cluster:test-serverless-cluster'
             }
-            
+
             result = create_cluster(
                 region='us-west-2',
                 cluster_identifier='test-serverless-cluster',
@@ -1205,14 +1212,14 @@ async def test_create_cluster_serverless():
                 engine_version='15.3',
                 with_express_configuration=False
             )
-            
+
             # Should return job ID
             assert isinstance(result, str)
             assert 'job_id' in result.lower() or len(result) > 10
-            
+
             # Give the background thread a moment to start
             time.sleep(0.2)
-            
+
             # Verify job was created
             try:
                 async_job_status_lock.acquire()
@@ -1228,7 +1235,7 @@ async def test_create_cluster_error_handling():
     # Mock the internal_create_serverless_cluster to raise an error
     with patch('awslabs.postgres_mcp_server.server.internal_create_serverless_cluster') as mock_create:
         mock_create.side_effect = Exception("Cluster creation failed")
-        
+
         result = create_cluster(
             region='us-west-2',
             cluster_identifier='test-error-cluster',
@@ -1236,13 +1243,13 @@ async def test_create_cluster_error_handling():
             engine_version='15.3',
             with_express_configuration=False
         )
-        
+
         # Should still return job ID
         assert isinstance(result, str)
-        
+
         # Give the background thread time to complete and fail
         time.sleep(0.3)
-        
+
         # Check that job failed
         try:
             async_job_status_lock.acquire()
@@ -1260,9 +1267,9 @@ async def test_create_cluster_error_handling():
 async def test_create_cluster_minimal_parameters():
     """Test create_cluster with minimal required parameters."""
     # Mock the internal_create_express_cluster function
-    with patch('awslabs.postgres_mcp_server.server.internal_create_express_cluster') as mock_create:
+    with patch('awslabs.postgres_mcp_server.server.internal_create_express_cluster'):
         with patch('awslabs.postgres_mcp_server.server.internal_get_cluster_properties') as mock_get_props:
-            with patch('awslabs.postgres_mcp_server.server.setup_aurora_iam_policy_for_current_user') as mock_setup_iam:
+            with patch('awslabs.postgres_mcp_server.server.setup_aurora_iam_policy_for_current_user'):
                 with patch('awslabs.postgres_mcp_server.server.internal_connect_to_database') as mock_connect:
                     mock_get_props.return_value = {
                         'Endpoint': 'minimal-endpoint.amazonaws.com',
@@ -1273,13 +1280,13 @@ async def test_create_cluster_minimal_parameters():
                     }
                     mock_conn = Mock_DBConnection(readonly=False)
                     mock_connect.return_value = (mock_conn, "Connected successfully")
-                    
+
                     result = create_cluster(
                         region='us-east-1',
                         cluster_identifier='minimal-cluster',
                         with_express_configuration=True
                     )
-                    
+
                     # Should return completed status
                     assert isinstance(result, str)
                     result_dict = json.loads(result)

@@ -1,12 +1,36 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import boto3
+import json
 import time
 import traceback
-import json
-from typing import List, Dict, Optional, Tuple, Any
-from loguru import logger
 from botocore.exceptions import ClientError
+from loguru import logger
+from typing import Any, Dict, Optional
+
 
 def internal_create_rds_client(region:str, with_express_configuration:bool):
+    """Create an RDS client with optional express configuration.
+
+    Args:
+        region: AWS region for the client
+        with_express_configuration: Whether to use express configuration
+
+    Returns:
+        boto3 RDS client instance
+    """
     if with_express_configuration:
         region = 'us-east-2'
         endpoint_url = f'https://rds-preview.{region}.amazonaws.com'
@@ -15,14 +39,23 @@ def internal_create_rds_client(region:str, with_express_configuration:bool):
         return boto3.client('rds', region_name=region)
 
 def internal_get_instance_properties(target_endpoint:str, region:str)-> Dict[str, Any]:
+    """Get RDS instance properties by endpoint.
+
+    Args:
+        target_endpoint: The endpoint to search for
+        region: AWS region to search in
+
+    Returns:
+        Dict containing instance properties, or None if not found
+    """
     rds_client = internal_create_rds_client(region=region, with_express_configuration=False)
     paginator = rds_client.get_paginator('describe_db_instances')
-    
+
     # Iterate through all instances
     try:
         for page in paginator.paginate():
             for instance in page['DBInstances']:
-                endpoint = instance.get('Endpoint', {}).get('Address') 
+                endpoint = instance.get('Endpoint', {}).get('Address')
                 if endpoint == target_endpoint:
                     return instance
     except ClientError as e:
@@ -45,22 +78,21 @@ def internal_get_cluster_properties(
     region: str,
     with_express_configuration: bool = False
 ) -> Dict[str, Any]:
-    """
-    Retrieve RDS cluster properties from AWS.
-    
+    """Retrieve RDS cluster properties from AWS.
+
     Args:
         cluster_identifier: RDS cluster identifier
         region: AWS region (e.g., 'us-east-1')
         with_express_configuration: Use express RDS client config (default: False)
-    
+
     Returns:
         Dict[str, Any]: Cluster properties from AWS RDS API
-    
+
     Raises:
         ValueError: If cluster_identifier or region is empty
         ClientError: If AWS API call fails (cluster not found, access denied, etc.)
         NoCredentialsError: If AWS credentials not configured
-    
+
     Example:
         >>> props = internal_get_cluster_properties('my-cluster', 'us-east-1')
         >>> print(props['Status'])
@@ -68,39 +100,39 @@ def internal_get_cluster_properties(
     # Input validation
     if not cluster_identifier or not region:
         raise ValueError("cluster_identifier and region are required")
-    
+
     logger.info(f"Fetching properties for cluster '{cluster_identifier}' in '{region}' "
                 f"with_express_configuration:{with_express_configuration}")
-    
+
     try:
         rds_client = internal_create_rds_client(region, with_express_configuration)
         response = rds_client.describe_db_clusters(
             DBClusterIdentifier=cluster_identifier
         )
-        
+
         # Safely extract cluster properties
         clusters = response.get('DBClusters', [])
         if not clusters:
             raise ValueError(
                 f"Cluster '{cluster_identifier}' not found in region '{region}'"
             )
-        
+
         cluster_properties = clusters[0]
-        
+
         # Log summary only
         logger.info(
             f"Retrieved cluster '{cluster_identifier}': "
             f"Status={cluster_properties.get('Status')}, "
             f"Engine={cluster_properties.get('Engine')}"
         )
-        
+
         # Full properties at debug level
         logger.debug(
             f"Cluster properties: {json.dumps(cluster_properties, indent=2, default=str)}"
         )
-        
+
         return cluster_properties
-        
+
     except ClientError as e:
         error_code = e.response['Error']['Code']
         logger.error(
@@ -114,22 +146,19 @@ def internal_get_cluster_properties(
 
 
 def internal_create_express_cluster(cluster_identifier: str) -> Dict[str, Any]:
+    """Create an Aurora PostgreSQL Express cluster.
 
-    """
-    Create an Aurora PostgreSQL Express cluster.
-    
     Args:
         cluster_identifier: Unique name for the cluster
-    
+
     Returns:
         Dict[str, Any]: Cluster properties
-    
+
     Raises:
         ValueError: If cluster_identifier is invalid
         ClientError: If AWS API call fails
     """
-
-    rds_client = internal_create_rds_client(region='us-east-2', with_express_configuration=True) 
+    rds_client = internal_create_rds_client(region='us-east-2', with_express_configuration=True)
 
     # Add default tags
     tags = []
@@ -148,7 +177,7 @@ def internal_create_express_cluster(cluster_identifier: str) -> Dict[str, Any]:
         result = rds_client.describe_db_clusters(
             DBClusterIdentifier=cluster_identifier
         )['DBClusters'][0]
-        
+
         logger.info("Waiting for cluster to become available...")
         waiter = rds_client.get_waiter('db_cluster_available')
         waiter.wait(
@@ -158,12 +187,12 @@ def internal_create_express_cluster(cluster_identifier: str) -> Dict[str, Any]:
                 'MaxAttempts': 1800
             }
         )
-        
+
         cluster_create_stop_time = time.time()
         elapsed_time = cluster_create_stop_time - cluster_create_start_time
         logger.info(f"Express Cluster {cluster_identifier} created successfully and took {elapsed_time:.2f} seconds")
         return result
-    
+
     except ClientError as e:
         logger.error(
             f"AWS error creating express cluster '{cluster_identifier}': "
@@ -185,10 +214,10 @@ def internal_create_serverless_cluster(
     max_capacity: float = 4,
     enable_cloudwatch_logs: bool = True
 ) -> Dict[str, Any]:
-    """
-    Create an Aurora PostgreSQL cluster with a single writer instance.
+    """Create an Aurora PostgreSQL cluster with a single writer instance.
+
     Credentials are automatically managed by AWS Secrets Manager.
-    
+
     Args:
         region: region of the cluster
         cluster_identifier: Name of the Aurora cluster
@@ -198,11 +227,10 @@ def internal_create_serverless_cluster(
         min_capacity: minimum ACU capacity
         max_capacity: maximum ACU capacity
         enable_cloudwatch_logs: Enable CloudWatch logs export
-        
+
     Returns:
         Dictionary containing cluster information and secret ARN
     """
-
     if not region:
         raise ValueError('region is required')
     if not cluster_identifier:
@@ -211,25 +239,25 @@ def internal_create_serverless_cluster(
         raise ValueError('engine_version is required')
     if not database_name:
         raise ValueError('database_name is required')
-    
+
     rds_client = internal_create_rds_client(region=region, with_express_configuration=False)
 
-    
+
     # Add default tags
     tags = []
     tags.append({'Key': 'CreatedBy', 'Value': 'MCP'})
-    
+
     # Prepare CloudWatch logs
     enable_cloudwatch_logs_exports = []
     if enable_cloudwatch_logs:
         enable_cloudwatch_logs_exports = ['postgresql']
-    
+
     try:
         # Create the Aurora cluster
         logger.info(f"Creating Aurora PostgreSQL cluster:{cluster_identifier} "
                     f"region:{region} engine_version:{engine_version} database_name:{database_name} "
                     f"master_username:{master_username}")
-        
+
         cluster_params = {
             'DBClusterIdentifier': cluster_identifier,
             'Engine': 'aurora-postgresql',
@@ -252,10 +280,10 @@ def internal_create_serverless_cluster(
         # Create the cluster
         cluster_create_start_time = time.time()
         cluster_response = rds_client.create_db_cluster(**cluster_params)
-        
+
         cluster_info = cluster_response['DBCluster']
         logger.info(f"Cluster {cluster_identifier} creation call started successfully. Status: {cluster_info['Status']}")
-        
+
         # Wait for cluster to be available
         logger.info("Waiting for cluster to become available...")
         waiter = rds_client.get_waiter('db_cluster_available')
@@ -271,11 +299,11 @@ def internal_create_serverless_cluster(
         cluster_create_stop_time = time.time()
         elapsed_time = cluster_create_stop_time - cluster_create_start_time
         logger.info(f"Cluster creation {cluster_identifier} took {elapsed_time:.2f} seconds")
-        
+
         # Create the writer instance
         instance_identifier = f"{cluster_identifier}-instance-1"
         logger.info(f"Creating writer instance: {instance_identifier}")
-        
+
         instance_params = {
             'DBInstanceIdentifier': instance_identifier,
             'DBInstanceClass': 'db.serverless',
@@ -285,12 +313,12 @@ def internal_create_serverless_cluster(
             'Tags': tags,
             'CopyTagsToSnapshot': True
         }
-        
+
         instance_create_start_time = time.time()
-        instance_response = rds_client.create_db_instance(**instance_params)
-        
+        rds_client.create_db_instance(**instance_params)
+
         logger.info(f"Writer instance {instance_identifier} created successfully")
-        
+
         # Wait for instance to be available
         logger.info(f"Waiting for instance {instance_identifier} to become available...")
         instance_waiter = rds_client.get_waiter('db_instance_available')
@@ -306,14 +334,14 @@ def internal_create_serverless_cluster(
         instance_create_stop_time = time.time()
         elapsed_time = instance_create_stop_time - instance_create_start_time
         logger.info(f"Instance creation {instance_identifier} took {elapsed_time:.2f} seconds")
-        
+
         # Get the final cluster details including the secret ARN
         final_cluster = rds_client.describe_db_clusters(
             DBClusterIdentifier=cluster_identifier
         )['DBClusters'][0]
-          
+
         return final_cluster
-        
+
     except ClientError as e:
         logger.error(
             f"AWS error creating serverless cluster '{cluster_identifier}': "
@@ -325,39 +353,32 @@ def internal_create_serverless_cluster(
         raise
 
 
-import boto3
-import json
-import traceback
-from typing import Optional
-import logging
 
-logger = logging.getLogger(__name__)
 
 def setup_aurora_iam_policy_for_current_user(
     db_user: str,
     cluster_resource_id: str,
     cluster_region: str
 ) -> Optional[str]:
-    """
-    Create or update IAM policy for Aurora access.
+    """Create or update IAM policy for Aurora access.
+
     Maintains one policy per user, adding new clusters as they're created.
-    
-    ⚠️  If running as assumed role, this will attempt to attach the policy to 
+
+    ⚠️  If running as assumed role, this will attempt to attach the policy to
         the BASE ROLE (not the session). This requires iam:AttachRolePolicy permission.
-    
+
     Args:
         db_user: PostgreSQL username (must have rds_iam role granted in database)
         cluster_resource_id: The DBI resource ID (e.g., 'cluster-ABCD123XYZ')
         cluster_region: AWS region where the Aurora cluster is located
-    
+
     Returns:
         Policy ARN if successful, None otherwise
-    
+
     Raises:
         ValueError: If running as federated user, root, or invalid identity
         boto3 exceptions: For AWS API errors (except AccessDenied on attach)
     """
-    
     # Validate inputs
     if not db_user or not isinstance(db_user, str):
         raise ValueError("db_user must be a non-empty string")
@@ -365,27 +386,27 @@ def setup_aurora_iam_policy_for_current_user(
         raise ValueError("cluster_resource_id must be a non-empty string")
     if not cluster_region or not isinstance(cluster_region, str):
         raise ValueError("cluster_region must be a non-empty string")
-    
+
     # Initialize clients
     sts = boto3.client('sts')
     iam = boto3.client('iam')
-    
+
     # 1. Get current IAM identity
     try:
         identity = sts.get_caller_identity()
         account_id = identity['Account']
         arn = identity['Arn']
         user_id = identity['UserId']
-        
-        logger.info(f"Current Identity:")
+
+        logger.info("Current Identity:")
         logger.info(f"  ARN: {arn}")
         logger.info(f"  Account: {account_id}")
         logger.info(f"  UserID: {user_id}")
-        
+
     except Exception as e:
         logger.error(f"❌ Error getting caller identity: {e}")
         raise
-    
+
     # ============================================================================
     # 🔵 MODIFIED: Extract base role from assumed role session
     # ============================================================================
@@ -393,14 +414,14 @@ def setup_aurora_iam_policy_for_current_user(
     current_user = None
     current_role = None
     identity_type = None
-    
+
     if ':user/' in arn:
         # Standard IAM user: arn:aws:iam::123456789012:user/username
         current_user = arn.split(':user/')[-1].split('/')[-1]
         identity_type = 'user'
-        logger.info(f"  Type: IAM User")
+        logger.info("  Type: IAM User")
         logger.info(f"  Username: {current_user}")
-        
+
     elif ':assumed-role/' in arn:
         # 🔵 MODIFIED: Extract BASE ROLE name from assumed role session
         # Assumed role ARN: arn:aws:sts::123456789012:assumed-role/RoleName/session-name
@@ -408,9 +429,9 @@ def setup_aurora_iam_policy_for_current_user(
         parts = arn.split(':assumed-role/')[-1].split('/')
         current_role = parts[0]  # This is the BASE ROLE name
         session_name = parts[1] if len(parts) > 1 else 'unknown'
-        
+
         identity_type = 'role'
-        logger.info(f"  Type: Assumed Role Session")
+        logger.info("  Type: Assumed Role Session")
         logger.info(f"  Base Role: {current_role}")
         logger.info(f"  Session Name: {session_name}")
         logger.info(f"  → Will attach policy to base role: {current_role}")
@@ -418,69 +439,68 @@ def setup_aurora_iam_policy_for_current_user(
             f"⚠️  Policy will be attached to role '{current_role}'\n"
             f"   This will grant Aurora access to ALL users/services that assume this role."
         )
-        
+
     elif ':federated-user/' in arn:
-        logger.error(f"  Type: Federated User")
+        logger.error("  Type: Federated User")
         raise ValueError(
             "Cannot attach policies to federated users.\n"
             "Please use the parent IAM user or role instead."
         )
-        
+
     elif ':root' in arn:
-        logger.error(f"  Type: Root User")
+        logger.error("  Type: Root User")
         raise ValueError(
             "Cannot (and should not) attach policies to root user.\n"
             "Please use an IAM user instead."
         )
-        
+
     else:
         raise ValueError(f"Unexpected ARN format: {arn}")
-    
+
     # 3. Prepare new resource ARN
     policy_name = f'AuroraIAMAuth-{db_user}'
     policy_arn = f"arn:aws:iam::{account_id}:policy/{policy_name}"
-    
+
     new_resource_arn = f"arn:aws:rds-db:{cluster_region}:{account_id}:dbuser:{cluster_resource_id}/{db_user}"
-    
-    logger.info(f"\nPolicy Configuration:")
+
+    logger.info("\nPolicy Configuration:")
     logger.info(f"  Policy Name: {policy_name}")
     logger.info(f"  New Resource: {new_resource_arn}")
     logger.info(f"  Cluster Region: {cluster_region}")
     logger.info(f"  Cluster Resource ID: {cluster_resource_id}")
-    
+
     # 4. Create or update policy
-    policy_created = False
-    
+
     try:
         # Try to get existing policy
         existing_policy = iam.get_policy(PolicyArn=policy_arn)
         logger.info(f"\n✓ Policy already exists: {policy_name}")
-        
+
         # Get current policy document
         policy_version = iam.get_policy_version(
             PolicyArn=policy_arn,
             VersionId=existing_policy['Policy']['DefaultVersionId']
         )
-        
+
         current_doc = policy_version['PolicyVersion']['Document']
         current_resources = current_doc['Statement'][0]['Resource']
-        
+
         # Normalize to list (could be string or list)
         if isinstance(current_resources, str):
             current_resources = [current_resources]
-        
+
         logger.info(f"  Current resources in policy: {len(current_resources)}")
         for idx, res in enumerate(current_resources, 1):
             logger.info(f"    {idx}. {res}")
-        
+
         # Check if new resource already exists
         if new_resource_arn in current_resources:
-            logger.info(f"\n✓ Cluster already included in policy - no update needed")
+            logger.info("\n✓ Cluster already included in policy - no update needed")
         else:
             # Add new resource to the list
             current_resources.append(new_resource_arn)
-            logger.info(f"\n→ Adding new cluster to policy...")
-            
+            logger.info("\n→ Adding new cluster to policy...")
+
             # Create updated policy document
             updated_doc = {
                 "Version": "2012-10-17",
@@ -492,11 +512,11 @@ def setup_aurora_iam_policy_for_current_user(
                     }
                 ]
             }
-            
+
             # Handle AWS policy version limits (max 5 versions per policy)
             versions = iam.list_policy_versions(PolicyArn=policy_arn)['Versions']
             logger.info(f"  Current policy versions: {len(versions)}/5")
-            
+
             if len(versions) >= 5:
                 # Find oldest non-default version to delete
                 non_default_versions = [v for v in versions if not v['IsDefaultVersion']]
@@ -507,22 +527,22 @@ def setup_aurora_iam_policy_for_current_user(
                         PolicyArn=policy_arn,
                         VersionId=oldest_version['VersionId']
                     )
-            
+
             # Create new policy version
             new_version = iam.create_policy_version(
                 PolicyArn=policy_arn,
                 PolicyDocument=json.dumps(updated_doc, indent=2),
                 SetAsDefault=True
             )
-            
-            logger.info(f"✓ Successfully updated policy")
+
+            logger.info("✓ Successfully updated policy")
             logger.info(f"  New version: {new_version['PolicyVersion']['VersionId']}")
             logger.info(f"  Total resources now: {len(current_resources)}")
-            
+
     except iam.exceptions.NoSuchEntityException:
         # Policy doesn't exist - create new one
-        logger.info(f"\nPolicy doesn't exist, creating new policy...")
-        
+        logger.info("\nPolicy doesn't exist, creating new policy...")
+
         policy_document = {
             "Version": "2012-10-17",
             "Statement": [
@@ -533,7 +553,7 @@ def setup_aurora_iam_policy_for_current_user(
                 }
             ]
         }
-        
+
         try:
             policy_response = iam.create_policy(
                 PolicyName=policy_name,
@@ -541,23 +561,22 @@ def setup_aurora_iam_policy_for_current_user(
                 Description=f'IAM authentication for Aurora PostgreSQL user {db_user} across all clusters'
             )
             policy_arn = policy_response['Policy']['Arn']
-            policy_created = True
             logger.info(f"✓ Successfully created new policy: {policy_name}")
             logger.info(f"  Policy ARN: {policy_arn}")
-            
+
         except iam.exceptions.EntityAlreadyExistsException:
-            logger.info(f"✓ Policy was just created by another process")
-            
+            logger.info("✓ Policy was just created by another process")
+
         except Exception as e:
             logger.error(f"\n❌ Error creating policy: {e}")
             raise
-    
+
     except Exception as e:
         logger.error(f"\n❌ Error checking/updating policy: {e}")
         trace_msg = traceback.format_exc()
         logger.error(f"Traceback: {trace_msg}")
         raise
-    
+
     # ============================================================================
     # 🔵 MODIFIED: Attach to base role with better error handling
     # ============================================================================
@@ -567,10 +586,10 @@ def setup_aurora_iam_policy_for_current_user(
             # IAM User - attach directly
             attached_policies = iam.list_attached_user_policies(UserName=current_user)
             already_attached = any(
-                p['PolicyArn'] == policy_arn 
+                p['PolicyArn'] == policy_arn
                 for p in attached_policies['AttachedPolicies']
             )
-            
+
             if already_attached:
                 logger.info(f"\n✓ Policy already attached to user: {current_user}")
             else:
@@ -579,26 +598,26 @@ def setup_aurora_iam_policy_for_current_user(
                     PolicyArn=policy_arn
                 )
                 logger.info(f"\n✓ Successfully attached policy to user: {current_user}")
-            
+
             # Display summary
             logger.info(f"\nAttached policies for user {current_user}:")
             attached_policies = iam.list_attached_user_policies(UserName=current_user)
             for policy in attached_policies['AttachedPolicies']:
                 marker = "  → " if policy['PolicyArn'] == policy_arn else "    "
                 logger.info(f"{marker}{policy['PolicyName']}")
-        
+
         elif identity_type == 'role':
             # 🔵 MODIFIED: Attach to BASE ROLE (not session)
             logger.info(f"\n→ Attempting to attach policy to base role: {current_role}")
-            
+
             try:
                 # Check if already attached to the base role
                 attached_policies = iam.list_attached_role_policies(RoleName=current_role)
                 already_attached = any(
-                    p['PolicyArn'] == policy_arn 
+                    p['PolicyArn'] == policy_arn
                     for p in attached_policies['AttachedPolicies']
                 )
-                
+
                 if already_attached:
                     logger.info(f"\n✓ Policy already attached to role: {current_role}")
                 else:
@@ -611,48 +630,48 @@ def setup_aurora_iam_policy_for_current_user(
                     logger.warning(
                         f"⚠️  All users/services assuming role '{current_role}' now have Aurora access"
                     )
-                
+
                 # Display summary
                 logger.info(f"\nAttached policies for role {current_role}:")
                 attached_policies = iam.list_attached_role_policies(RoleName=current_role)
                 for policy in attached_policies['AttachedPolicies']:
                     marker = "  → " if policy['PolicyArn'] == policy_arn else "    "
                     logger.info(f"{marker}{policy['PolicyName']}")
-                    
-            except iam.exceptions.AccessDeniedException as e:
+
+            except iam.exceptions.AccessDeniedException:
                 # 🔵 MODIFIED: Graceful handling of permission denied
                 logger.error(f"\n❌ Access Denied: Cannot attach policy to role '{current_role}'")
-                logger.error(f"   Your session does not have 'iam:AttachRolePolicy' permission")
+                logger.error("   Your session does not have 'iam:AttachRolePolicy' permission")
                 logger.info(f"\n✓ Policy created successfully: {policy_arn}")
-                logger.info(f"   But could not be attached automatically.")
-                logger.info(f"\n📋 MANUAL STEPS REQUIRED:")
-                logger.info(f"\n Option 1: Have an administrator attach the policy to the role")
-                logger.info(f"   aws iam attach-role-policy \\")
+                logger.info("   But could not be attached automatically.")
+                logger.info("\n📋 MANUAL STEPS REQUIRED:")
+                logger.info("\n Option 1: Have an administrator attach the policy to the role")
+                logger.info("   aws iam attach-role-policy \\")
                 logger.info(f"     --role-name {current_role} \\")
                 logger.info(f"     --policy-arn {policy_arn}")
-                logger.info(f"\n Option 2: Attach to your individual IAM user (if you have one)")
-                logger.info(f"   aws iam attach-user-policy \\")
-                logger.info(f"     --user-name YOUR_IAM_USERNAME \\")
+                logger.info("\n Option 2: Attach to your individual IAM user (if you have one)")
+                logger.info("   aws iam attach-user-policy \\")
+                logger.info("     --user-name YOUR_IAM_USERNAME \\")
                 logger.info(f"     --policy-arn {policy_arn}")
-                logger.info(f"\n Option 3: Grant the role permission to attach policies")
+                logger.info("\n Option 3: Grant the role permission to attach policies")
                 logger.info(f"   (Admin needs to add iam:AttachRolePolicy to role '{current_role}')")
-                
+
                 # Return policy ARN even though not attached
                 return policy_arn
-                
+
             except iam.exceptions.NoSuchEntityException:
                 logger.error(f"\n❌ Role '{current_role}' not found")
-                logger.error(f"   This is unexpected - the role should exist since you're using it")
+                logger.error("   This is unexpected - the role should exist since you're using it")
                 raise
-        
+
         return policy_arn
-        
+
     except iam.exceptions.NoSuchEntityException:
         entity_name = current_user if identity_type == 'user' else current_role
         entity_type = 'User' if identity_type == 'user' else 'Role'
         logger.error(f"\n❌ Error: {entity_type} '{entity_name}' not found")
         raise
-        
+
     except iam.exceptions.LimitExceededException:
         entity_name = current_user if identity_type == 'user' else current_role
         entity_type = 'user' if identity_type == 'user' else 'role'
@@ -660,7 +679,7 @@ def setup_aurora_iam_policy_for_current_user(
         logger.error("Maximum 10 managed policies can be attached to a user or role")
         logger.error("Consider using inline policies or consolidating existing policies")
         raise
-        
+
     except Exception as e:
         logger.error(f"\n❌ Error attaching policy: {e}")
         trace_msg = traceback.format_exc()
