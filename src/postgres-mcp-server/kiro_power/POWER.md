@@ -78,7 +78,7 @@ Call mcp_postgres_run_query with:
 - Always use LIMIT on browsing queries
 - Run EXPLAIN plans before heavy queries
 - Bound queries with WHERE predicates
-- 
+-
 
 ## Common Workflows
 
