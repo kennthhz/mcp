@@ -88,6 +88,7 @@ class PsycopgPoolConnection(AbstractDBConnection):
         self.pool: Optional['AsyncConnectionPool[Any]'] = None
         self.rw_lock = RWLock()
         self.created_time = datetime.now()
+        self._last_connection_error: Optional[str] = None
 
         if is_iam_auth:
             # if db_user is set, then it is IAM auth scenario and iam_auth_token must be set
@@ -129,13 +130,27 @@ class PsycopgPoolConnection(AbstractDBConnection):
 
             self.created_time = datetime.now()
             self.conninfo = f'host={self.host} port={self.port} dbname={self.database} user={self.user} password={password}'
+
+            # Store connection errors for better error reporting
+            self._last_connection_error = None
+
             self.pool = AsyncConnectionPool(
                 self.conninfo, min_size=self.min_size, max_size=self.max_size, open=False
             )
 
+            # Enable error capturing for better diagnostics
+            self._enable_connection_error_capture()
+
             # wait up to 30 seconds to fill the pool with connections
-            await self.pool.open(True, 30)
-            logger.info('Connection pool initialized successfully')
+            try:
+                await self.pool.open(True, 30)
+                logger.info('Connection pool initialized successfully')
+            except Exception as e:
+                logger.error(f'Pool initialization failed: {str(e)}')
+
+                # Use captured connection error if available, otherwise use original error
+                error_msg = self._last_connection_error or str(e)
+                raise Exception(f'Connection failed: {error_msg}') from e
 
     async def _get_connection(self):
         """Get a database connection from the pool."""
@@ -145,6 +160,26 @@ class PsycopgPoolConnection(AbstractDBConnection):
             if self.pool is None:
                 raise ValueError('Failed to initialize connection pool')
             return self.pool.connection(timeout=15.0)
+
+    def _enable_connection_error_capture(self) -> None:
+        """Enable connection error capture for better error diagnostics."""
+        if not self.pool:
+            return
+
+        original_connect = self.pool._connect
+
+        async def error_capturing_connect(timeout: Optional[float] = None):
+            """Wrapper to capture connection errors for better error reporting."""
+            try:
+                return await original_connect(timeout)
+            except Exception as e:
+                # Clean up the error message for better readability
+                error_msg = str(e).strip()
+                self._last_connection_error = error_msg
+                logger.error(f'Connection attempt failed: {error_msg}')
+                raise
+
+        self.pool._connect = error_capturing_connect
 
     async def check_expiry(self):
         """Check and handle pool expiry."""
