@@ -1017,3 +1017,307 @@ class TestPsycopgConnector:
             # Should close and reinitialize
             mock_pool.close.assert_called_once()
             mock_init.assert_called_once()
+
+    @pytest.mark.asyncio
+    @patch('awslabs.postgres_mcp_server.connection.psycopg_pool_connection.AsyncConnectionPool')
+    async def test_error_capture_during_pool_initialization(self, mock_connection_pool):
+        """Test that connection errors are captured during pool initialization."""
+        # Setup mock pool that fails during open
+        mock_pool = AsyncMock()
+        mock_pool.open.side_effect = Exception('Pool initialization failed')
+        mock_connection_pool.return_value = mock_pool
+
+        # Create connection
+        conn = PsycopgPoolConnection(
+            host='localhost',
+            port=5432,
+            database='test_db',
+            readonly=True,
+            secret_arn='test_secret_arn',  # pragma: allowlist secret
+            db_user='test_user',
+            is_iam_auth=False,
+            region='us-east-1',
+            is_test=True,
+        )
+
+        # Test that initialization fails with detailed error
+        with pytest.raises(Exception) as exc_info:
+            await conn.initialize_pool()
+
+        # Verify the error message includes our enhanced error details
+        assert 'Connection failed:' in str(exc_info.value)
+        assert 'Pool initialization failed' in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_error_capture_mechanism_enabled(self):
+        """Test that error capture mechanism is properly enabled."""
+        # Create connection
+        conn = PsycopgPoolConnection(
+            host='localhost',
+            port=5432,
+            database='test_db',
+            readonly=True,
+            secret_arn='test_secret_arn',  # pragma: allowlist secret
+            db_user='test_user',
+            is_iam_auth=False,
+            region='us-east-1',
+            is_test=True,
+        )
+
+        # Create a mock pool and set it
+        mock_pool = AsyncMock()
+        conn.pool = mock_pool
+
+        # Store original _connect method
+        original_connect = mock_pool._connect
+
+        # Enable error capture
+        conn._enable_connection_error_capture()
+
+        # Verify that the _connect method was wrapped (it should be different now)
+        assert conn.pool._connect != original_connect
+        assert conn._last_connection_error is None
+
+    @pytest.mark.asyncio
+    async def test_connection_error_capture_and_storage(self):
+        """Test that connection errors are captured and stored properly."""
+        # Create connection
+        conn = PsycopgPoolConnection(
+            host='localhost',
+            port=5432,
+            database='test_db',
+            readonly=True,
+            secret_arn='test_secret_arn',  # pragma: allowlist secret
+            db_user='test_user',
+            is_iam_auth=False,
+            region='us-east-1',
+            is_test=True,
+        )
+
+        # Setup mock pool with failing _connect method
+        mock_pool = AsyncMock()
+        original_connect = AsyncMock()
+        original_connect.side_effect = Exception('Connection refused: authentication failed')
+        mock_pool._connect = original_connect
+
+        # Set up the pool and enable error capture
+        conn.pool = mock_pool
+        conn._enable_connection_error_capture()
+
+        # Test that connection errors are captured
+        with pytest.raises(Exception) as exc_info:
+            await conn.pool._connect()
+
+        # Verify the error was captured
+        assert conn._last_connection_error == 'Connection refused: authentication failed'
+        assert 'Connection refused: authentication failed' in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_error_capture_with_no_pool(self):
+        """Test error capture gracefully handles missing pool."""
+        # Create connection without initializing pool
+        conn = PsycopgPoolConnection(
+            host='localhost',
+            port=5432,
+            database='test_db',
+            readonly=True,
+            secret_arn='test_secret_arn',  # pragma: allowlist secret
+            db_user='test_user',
+            is_iam_auth=False,
+            region='us-east-1',
+            is_test=True,
+        )
+
+        # Ensure pool is None
+        conn.pool = None
+
+        # Test that enabling error capture with no pool doesn't crash
+        conn._enable_connection_error_capture()  # Should not raise an exception
+
+        # Verify no error capture was set up
+        assert conn._last_connection_error is None
+
+    @pytest.mark.asyncio
+    @patch('awslabs.postgres_mcp_server.connection.psycopg_pool_connection.AsyncConnectionPool')
+    async def test_pool_initialization_with_captured_connection_error(self, mock_connection_pool):
+        """Test pool initialization failure with captured connection error details."""
+        # Create connection
+        conn = PsycopgPoolConnection(
+            host='localhost',
+            port=5432,
+            database='test_db',
+            readonly=True,
+            secret_arn='test_secret_arn',  # pragma: allowlist secret
+            db_user='test_user',
+            is_iam_auth=False,
+            region='us-east-1',
+            is_test=True,
+        )
+
+        # Setup mock pool that fails during open and captures connection error
+        mock_pool = AsyncMock()
+
+        async def mock_open_with_error_capture(wait, timeout):
+            # Simulate the error capture mechanism setting the error
+            conn._last_connection_error = 'FATAL: pg_hba.conf rejects connection for host'
+            raise Exception('PoolTimeout: pool initialization incomplete after 30 sec')
+
+        mock_pool.open.side_effect = mock_open_with_error_capture
+        mock_connection_pool.return_value = mock_pool
+
+        # Test that initialization fails with captured error details
+        with pytest.raises(Exception) as exc_info:
+            await conn.initialize_pool()
+
+        # Verify the error message uses the captured connection error
+        assert 'Connection failed: FATAL: pg_hba.conf rejects connection for host' in str(
+            exc_info.value
+        )
+
+    @pytest.mark.asyncio
+    @patch('awslabs.postgres_mcp_server.connection.psycopg_pool_connection.AsyncConnectionPool')
+    async def test_pool_initialization_fallback_to_original_error(self, mock_connection_pool):
+        """Test pool initialization falls back to original error when no connection error captured."""
+        # Setup mock pool that fails during open
+        mock_pool = AsyncMock()
+        mock_pool.open.side_effect = Exception(
+            'PoolTimeout: pool initialization incomplete after 30 sec'
+        )
+        mock_connection_pool.return_value = mock_pool
+
+        # Create connection
+        conn = PsycopgPoolConnection(
+            host='localhost',
+            port=5432,
+            database='test_db',
+            readonly=True,
+            secret_arn='test_secret_arn',  # pragma: allowlist secret
+            db_user='test_user',
+            is_iam_auth=False,
+            region='us-east-1',
+            is_test=True,
+        )
+
+        # Ensure no connection error is captured
+        conn._last_connection_error = None
+
+        # Test that initialization fails with original error
+        with pytest.raises(Exception) as exc_info:
+            await conn.initialize_pool()
+
+        # Verify the error message uses the original error
+        assert (
+            'Connection failed: PoolTimeout: pool initialization incomplete after 30 sec'
+            in str(exc_info.value)
+        )
+
+    @pytest.mark.asyncio
+    async def test_error_capture_wrapper_preserves_original_functionality(self):
+        """Test that error capture wrapper doesn't break normal connection functionality."""
+        # Create connection
+        conn = PsycopgPoolConnection(
+            host='localhost',
+            port=5432,
+            database='test_db',
+            readonly=True,
+            secret_arn='test_secret_arn',  # pragma: allowlist secret
+            db_user='test_user',
+            is_iam_auth=False,
+            region='us-east-1',
+            is_test=True,
+        )
+
+        # Setup mock pool with successful connection
+        mock_pool = AsyncMock()
+        mock_connection = MagicMock()
+        original_connect = AsyncMock(return_value=mock_connection)
+        mock_pool._connect = original_connect
+
+        # Set up the pool and enable error capture
+        conn.pool = mock_pool
+        conn._enable_connection_error_capture()
+
+        # Test successful connection
+        result = await conn.pool._connect()
+
+        # Verify connection works normally
+        assert result == mock_connection
+        assert conn._last_connection_error is None  # No error should be captured
+
+    @pytest.mark.asyncio
+    async def test_error_capture_with_multiple_connection_attempts(self):
+        """Test error capture with multiple connection attempts (last error wins)."""
+        # Create connection
+        conn = PsycopgPoolConnection(
+            host='localhost',
+            port=5432,
+            database='test_db',
+            readonly=True,
+            secret_arn='test_secret_arn',  # pragma: allowlist secret
+            db_user='test_user',
+            is_iam_auth=False,
+            region='us-east-1',
+            is_test=True,
+        )
+
+        # Setup mock pool with different errors on each call
+        mock_pool = AsyncMock()
+        call_count = 0
+
+        async def mock_connect_with_different_errors(timeout=None):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise Exception('First connection error')
+            elif call_count == 2:
+                raise Exception('Second connection error')
+            else:
+                raise Exception('Final connection error')
+
+        mock_pool._connect = mock_connect_with_different_errors
+
+        # Set up the pool and enable error capture
+        conn.pool = mock_pool
+        conn._enable_connection_error_capture()
+
+        # Test multiple connection attempts
+        for i in range(3):
+            with pytest.raises(Exception):
+                await conn.pool._connect()
+
+        # Verify the last error is captured
+        assert conn._last_connection_error == 'Final connection error'
+
+    @pytest.mark.asyncio
+    async def test_error_message_formatting_and_cleanup(self):
+        """Test that error messages are properly formatted and cleaned up."""
+        # Create connection
+        conn = PsycopgPoolConnection(
+            host='localhost',
+            port=5432,
+            database='test_db',
+            readonly=True,
+            secret_arn='test_secret_arn',  # pragma: allowlist secret
+            db_user='test_user',
+            is_iam_auth=False,
+            region='us-east-1',
+            is_test=True,
+        )
+
+        # Setup mock pool with whitespace in error message
+        mock_pool = AsyncMock()
+        original_connect = AsyncMock()
+        # Test with whitespace and newlines that should be cleaned up
+        original_connect.side_effect = Exception('  \n  Connection error with whitespace  \n  ')
+        mock_pool._connect = original_connect
+
+        # Set up the pool and enable error capture
+        conn.pool = mock_pool
+        conn._enable_connection_error_capture()
+
+        # Test that connection errors are captured and cleaned
+        with pytest.raises(Exception):
+            await conn.pool._connect()
+
+        # Verify the error message was cleaned up (stripped of whitespace)
+        assert conn._last_connection_error == 'Connection error with whitespace'
