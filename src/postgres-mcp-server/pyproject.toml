@@ -6,7 +6,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "loguru>=0.7.0",
-    "mcp[cli]>=1.11.0",
+    "mcp[cli]>=1.23.0",
     "pydantic>=2.10.6",
     "boto3 @ file:////Users/goelshar/mcp/src/postgres-mcp-server/dist/boto3-1.40.61-py3-none-any.whl",
     "botocore @ file:////Users/goelshar/mcp/src/postgres-mcp-server/dist/botocore-1.40.61-py3-none-any.whl",
