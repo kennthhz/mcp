@@ -164,26 +164,24 @@ async def run_query(
     if db_connection.readonly_query:
         matches = detect_mutating_keywords(sql)
         if (bool)(matches):
-            error_msg = (
-                f'Query rejected: only readonly queries allowed. Detected keywords: {matches}'
-            )
             logger.info(
                 (
                     f'query is rejected because current setting only allows readonly query.'
                     f'detected keywords: {matches}, SQL query: {sql}'
                 )
             )
-            await ctx.error(error_msg)
-            return [{'error': error_msg}]
+            await ctx.error(write_query_prohibited_key)
+            return [{'error': write_query_prohibited_key}]
 
     issues = check_sql_injection_risk(sql)
     if issues:
-        error_info = {'message': 'Query parameter contains suspicious pattern', 'details': issues}
         logger.info(
             f'query is rejected because it contains risky SQL pattern, SQL query: {sql}, reasons: {issues}'
         )
-        await ctx.error(str(error_info))
-        return [{'error': error_info}]
+        await ctx.error(
+            str({'message': 'Query parameter contains suspicious pattern', 'details': issues})
+        )
+        return [{'error': query_injection_risk_key}]
 
     try:
         logger.info(
@@ -201,18 +199,15 @@ async def run_query(
         return parse_execute_response(response)
     except ClientError as e:
         logger.exception(client_error_code_key)
-        error_info = {
-            'code': e.response['Error']['Code'],
-            'message': e.response['Error']['Message'],
-        }
-        await ctx.error(str(error_info))
-        return [{'error': error_info}]
+        await ctx.error(
+            str({'code': e.response['Error']['Code'], 'message': e.response['Error']['Message']})
+        )
+        return [{'error': client_error_code_key}]
     except Exception as e:
         logger.exception(unexpected_error_key)
         error_details = f'{type(e).__name__}: {str(e)}'
-        error_info = {'message': error_details}
-        await ctx.error(str(error_info))
-        return [{'error': error_info}]
+        await ctx.error(str({'message': error_details}))
+        return [{'error': unexpected_error_key}]
 
 
 @mcp.tool(name='get_table_schema', description='Fetch table columns and comments from Postgres')

@@ -28,6 +28,7 @@ from awslabs.postgres_mcp_server.connection.psycopg_pool_connection import Psyco
 from awslabs.postgres_mcp_server.server import (
     async_job_status,
     async_job_status_lock,
+    client_error_code_key,
     create_cluster,
     db_connection_map,
     get_database_connection_info,
@@ -36,6 +37,8 @@ from awslabs.postgres_mcp_server.server import (
     is_database_connected,
     main,
     run_query,
+    unexpected_error_key,
+    write_query_prohibited_key,
 )
 from conftest import DummyCtx, Mock_DBConnection, Mock_PsycopgPoolConnection, MockException
 from unittest.mock import AsyncMock, patch
@@ -596,11 +599,7 @@ async def test_run_query_throw_client_error():
     assert len(response) == 1
     assert len(response[0]) == 1
     assert 'error' in response[0]
-    error_info = response[0].get('error')
-    assert isinstance(error_info, dict)
-    assert 'code' in error_info
-    assert 'message' in error_info
-    assert error_info['code'] == 'AccessDeniedException'
+    assert response[0].get('error') == client_error_code_key
 
 
 @pytest.mark.asyncio
@@ -618,10 +617,7 @@ async def test_run_query_throw_unexpected_error():
     assert len(response) == 1
     assert len(response[0]) == 1
     assert 'error' in response[0]
-    error_info = response[0].get('error')
-    assert isinstance(error_info, dict)
-    assert 'message' in error_info
-    assert 'Exception:' in error_info['message']
+    assert response[0].get('error') == unexpected_error_key
 
 
 @pytest.mark.asyncio
@@ -642,9 +638,7 @@ async def test_run_query_write_queries_on_readonly_setting():
         assert len(response) == 1
         assert len(response[0]) == 1
         assert 'error' in response[0]
-        error_msg = response[0].get('error')
-        assert isinstance(error_msg, str)
-        assert 'Query rejected: only readonly queries allowed' in error_msg
+        assert response[0].get('error') == write_query_prohibited_key
 
 
 @pytest.mark.asyncio
