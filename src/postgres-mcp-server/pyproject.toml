@@ -10,7 +10,7 @@ dependencies = [
     "pydantic>=2.10.6",
     "boto3 @ file:////Users/goelshar/mcp/src/postgres-mcp-server/dist/boto3-1.40.61-py3-none-any.whl",
     "botocore @ file:////Users/goelshar/mcp/src/postgres-mcp-server/dist/botocore-1.40.61-py3-none-any.whl",
-    "psycopg[pool]>=3.1.12",
+    "psycopg[binary,pool]>=3.1.12",
     "aiorwlock"
 ]
 license = {text = "Apache-2.0"}
