@@ -40,9 +40,13 @@ from awslabs.postgres_mcp_server.connection.db_connection_map import (
     ConnectionMethod,
     DatabaseType,
 )
+from awslabs.postgres_mcp_server.connection.cp_api_connection import (
+    internal_get_cluster_properties,
+)
 from awslabs.postgres_mcp_server.server import (
     connect_to_database,
     create_cluster,
+    db_connection_map,
     get_database_connection_info,
     get_job_status,
     get_table_schema,
@@ -93,26 +97,64 @@ def mock_ctx():
     return MockContext()
 
 
+@pytest.fixture(autouse=True)
+def enable_write_operations(monkeypatch):
+    """Enable write operations for integration tests by setting readonly_query to False."""
+    monkeypatch.setattr(server_module, 'readonly_query', False)
+
+
 @pytest.fixture(scope='session')
-def cluster_endpoints(integration_config):
-    """Get cluster endpoints from configuration."""
+def cluster_endpoints(integration_config, aws_region):
+    """Get cluster endpoints from configuration or auto-discover from AWS."""
     endpoints = {}
     
-    # Get regular cluster endpoint from config
-    regular_config = integration_config['clusters']['regular']
-    endpoints['regular'] = {
-        'endpoint': regular_config.get('endpoint', ''),
-        'port': regular_config.get('port', 5432),
-        'cluster_identifier': regular_config['cluster_identifier']
-    }
+    def get_endpoint_info(cluster_config, cluster_type):
+        """Get endpoint info for a cluster, auto-discovering if not in config."""
+        cluster_id = cluster_config['cluster_identifier']
+        configured_endpoint = cluster_config.get('endpoint', '')
+        port = cluster_config.get('port', 5432)
+        
+        # If endpoint is provided in config, use it
+        if configured_endpoint:
+            return {
+                'endpoint': configured_endpoint,
+                'port': port,
+                'cluster_identifier': cluster_id
+            }
+        
+        # Otherwise, try to auto-discover from AWS
+        try:
+            with_express = cluster_config.get('with_express_configuration', False)
+            cluster_props = internal_get_cluster_properties(
+                cluster_identifier=cluster_id,
+                region=aws_region,
+                with_express_configuration=with_express
+            )
+            
+            discovered_endpoint = cluster_props.get('Endpoint', '')
+            discovered_port = cluster_props.get('Port', port)
+            
+            return {
+                'endpoint': discovered_endpoint,
+                'port': discovered_port,
+                'cluster_identifier': cluster_id
+            }
+            
+        except Exception as e:
+
+            return {
+                'endpoint': '',
+                'port': port,
+                'cluster_identifier': cluster_id
+            }
     
-    # Get express cluster endpoint from config
+    # Get regular cluster endpoint
+    regular_config = integration_config['clusters']['regular']
+    endpoints['regular'] = get_endpoint_info(regular_config, 'regular')
+    
+    # Get express cluster endpoint
     express_config = integration_config['clusters']['express']
-    endpoints['express'] = {
-        'endpoint': express_config.get('endpoint', ''),
-        'port': express_config.get('port', 5432),
-        'cluster_identifier': express_config['cluster_identifier']
-    }
+    endpoints['express'] = get_endpoint_info(express_config, 'express')
     
     return endpoints
 
@@ -403,13 +445,13 @@ class TestDatabaseConnection:
         assert result['connection_method'] == 'pgwire_iam'
         assert result['cluster_identifier'] == cluster_id
         
-        # # Verify connection
-        # is_connected = is_database_connected(
-        #     cluster_identifier=cluster_id,
-        #     db_endpoint=endpoint_info['endpoint'],
-        #     database=cluster_config['database']
-        # )
-        # assert is_connected
+        # Verify connection
+        is_connected = is_database_connected(
+            cluster_identifier=cluster_id,
+            db_endpoint=endpoint_info['endpoint'],
+            database=cluster_config['database']
+        )
+        assert is_connected
     
     @pytest.mark.asyncio
     async def test_connect_via_pgwire_regular(
@@ -477,13 +519,13 @@ class TestDatabaseConnection:
         assert result['connection_method'] == 'pgwire_iam'
         assert result['cluster_identifier'] == cluster_id
         
-        # # Verify connection
-        # is_connected = is_database_connected(
-        #     cluster_identifier=cluster_id,
-        #     db_endpoint=endpoint_info['endpoint'],
-        #     database=cluster_config['database']
-        # )
-        # assert is_connected
+        # Verify connection
+        is_connected = is_database_connected(
+            cluster_identifier=cluster_id,
+            db_endpoint=endpoint_info['endpoint'],
+            database=cluster_config['database']
+        )
+        assert is_connected
     
     @pytest.mark.asyncio
     async def test_get_database_connection_info(self):
@@ -514,135 +556,50 @@ class TestQueryExecution:
     """Test query execution functionality."""
     
     @pytest.mark.asyncio
-    async def test_run_select_query_rds_api(self, mock_ctx, ensure_rds_api_connection):
-        """Test running SELECT query via RDS API."""
+    async def test_comprehensive_ddl_dml_operations_rds_api(self, mock_ctx, ensure_rds_api_connection):
+        """Test comprehensive DDL and DML operations via RDS API."""
         conn_info = ensure_rds_api_connection
-        
-        # Run query
-        result = await run_query(
-            sql='SELECT version(), current_database(), current_user',
-            ctx=mock_ctx,
-            connection_method=ConnectionMethod.RDS_API,
-            cluster_identifier=conn_info['cluster_id'],
-            db_endpoint=conn_info['endpoint'],
-            database=conn_info['database']
+        await self._run_comprehensive_ddl_dml_test(
+            mock_ctx, conn_info, ConnectionMethod.RDS_API, 'rds_api'
         )
-        
-        # Verify result
-        assert isinstance(result, list)
-        assert len(result) > 0
-        assert 'version' in result[0]
-        assert 'PostgreSQL' in result[0]['version']
-        assert mock_ctx.errors == []
     
     @pytest.mark.asyncio
-    async def test_run_select_query_pgwire_iam_express(
+    async def test_comprehensive_ddl_dml_operations_pgwire_iam_express(
         self, mock_ctx, ensure_pgwire_iam_connection_express
     ):
-        """Test running SELECT query via PG Wire IAM on express cluster."""
+        """Test comprehensive DDL and DML operations via PG Wire IAM on express cluster."""
         conn_info = ensure_pgwire_iam_connection_express
-        
-        # Run query
-        result = await run_query(
-            sql='SELECT 1 as test, current_database()',
-            ctx=mock_ctx,
-            connection_method=ConnectionMethod.PG_WIRE_IAM_PROTOCOL,
-            cluster_identifier=conn_info['cluster_id'],
-            db_endpoint=conn_info['endpoint'],
-            database=conn_info['database']
+        await self._run_comprehensive_ddl_dml_test(
+            mock_ctx, conn_info, ConnectionMethod.PG_WIRE_IAM_PROTOCOL, 'pgwire_iam_express'
         )
-        
-        # Verify result
-        assert isinstance(result, list)
-        assert len(result) > 0
-        assert result[0]['test'] == 1
-        assert mock_ctx.errors == []
     
     @pytest.mark.asyncio
-    async def test_run_select_query_pgwire_regular(
+    async def test_comprehensive_ddl_dml_operations_pgwire_regular(
         self, mock_ctx, ensure_pgwire_connection_regular
     ):
-        """Test running SELECT query via PG Wire on regular cluster."""
+        """Test comprehensive DDL and DML operations via PG Wire on regular cluster."""
         conn_info = ensure_pgwire_connection_regular
-        
-        # Run query
-        result = await run_query(
-            sql='SELECT version(), current_user',
-            ctx=mock_ctx,
-            connection_method=ConnectionMethod.PG_WIRE_PROTOCOL,
-            cluster_identifier=conn_info['cluster_id'],
-            db_endpoint=conn_info['endpoint'],
-            database=conn_info['database']
+        await self._run_comprehensive_ddl_dml_test(
+            mock_ctx, conn_info, ConnectionMethod.PG_WIRE_PROTOCOL, 'pgwire_regular'
         )
-        
-        # Verify result
-        assert isinstance(result, list)
-        assert len(result) > 0
-        assert 'version' in result[0]
-        assert 'PostgreSQL' in result[0]['version']
-        assert mock_ctx.errors == []
     
     @pytest.mark.asyncio
-    async def test_run_select_query_pgwire_iam_regular(
+    async def test_comprehensive_ddl_dml_operations_pgwire_iam_regular(
         self, mock_ctx, ensure_pgwire_iam_connection_regular
     ):
-        """Test running SELECT query via PG Wire IAM on regular cluster."""
+        """Test comprehensive DDL and DML operations via PG Wire IAM on regular cluster."""
         conn_info = ensure_pgwire_iam_connection_regular
-        
-        # Run query
-        result = await run_query(
-            sql='SELECT version(), current_user',
-            ctx=mock_ctx,
-            connection_method=ConnectionMethod.PG_WIRE_IAM_PROTOCOL,
-            cluster_identifier=conn_info['cluster_id'],
-            db_endpoint=conn_info['endpoint'],
-            database=conn_info['database']
+        await self._run_comprehensive_ddl_dml_test(
+            mock_ctx, conn_info, ConnectionMethod.PG_WIRE_IAM_PROTOCOL, 'pgwire_iam_regular'
         )
-        
-        # Verify result
-        assert isinstance(result, list)
-        assert len(result) > 0
-        assert 'version' in result[0]
-        assert 'PostgreSQL' in result[0]['version']
-        assert mock_ctx.errors == []
     
-    @pytest.mark.asyncio
-    async def test_run_parameterized_query(self, mock_ctx, ensure_rds_api_connection):
-        """Test running parameterized query."""
-        conn_info = ensure_rds_api_connection
+    async def _run_comprehensive_ddl_dml_test(self, mock_ctx, conn_info, connection_method, test_suffix):
+        """Helper method to run comprehensive DDL/DML test for any connection method."""
         
-        # Run parameterized query
-        result = await run_query(
-            sql='SELECT %(value)s as result',
-            ctx=mock_ctx,
-            connection_method=ConnectionMethod.RDS_API,
-            cluster_identifier=conn_info['cluster_id'],
-            db_endpoint=conn_info['endpoint'],
-            database=conn_info['database'],
-            query_parameters=[
-                {'name': 'value', 'value': {'stringValue': 'test_param'}}
-            ]
-        )
-        
-        # Verify result
-        assert isinstance(result, list)
-        assert len(result) > 0
-        assert result[0]['result'] == 'test_param'
-        assert mock_ctx.errors == []
-
-
-class TestDDLOperations:
-    """Test DDL (Data Definition Language) operations."""
-    
-    @pytest.mark.asyncio
-    async def test_create_table(self, mock_ctx, ensure_rds_api_connection):
-        """Test creating a table."""
-        conn_info = ensure_rds_api_connection
-        
-        # Create table
-        result = await run_query(
+        # 1. DDL: Create table if not exists, then clear any existing data
+        await run_query(
             sql='''
-                CREATE TABLE IF NOT EXISTS test_integration_table (
+                CREATE TABLE IF NOT EXISTS mcp_test_table (
                     id SERIAL PRIMARY KEY,
                     name VARCHAR(100) NOT NULL,
                     value INTEGER,
@@ -650,225 +607,132 @@ class TestDDLOperations:
                 )
             ''',
             ctx=mock_ctx,
-            connection_method=ConnectionMethod.RDS_API,
+            connection_method=connection_method,
             cluster_identifier=conn_info['cluster_id'],
             db_endpoint=conn_info['endpoint'],
             database=conn_info['database']
         )
+        # Clear any warnings from table creation
+        mock_ctx.errors.clear()
         
-        # Verify no errors
-        assert mock_ctx.errors == []
-    
-    @pytest.mark.asyncio
-    async def test_get_table_schema(self, mock_ctx, ensure_rds_api_connection):
-        """Test retrieving table schema."""
-        conn_info = ensure_rds_api_connection
-        
-        # Get table schema
-        result = await get_table_schema(
-            connection_method=ConnectionMethod.RDS_API,
+        # Clear any existing data from previous test runs
+        await run_query(
+            sql='DELETE FROM mcp_test_table',
+            ctx=mock_ctx,
+            connection_method=connection_method,
             cluster_identifier=conn_info['cluster_id'],
             db_endpoint=conn_info['endpoint'],
-            database=conn_info['database'],
-            table_name='test_integration_table',
-            ctx=mock_ctx
+            database=conn_info['database']
+        )
+        # Clear any warnings from delete operation
+        mock_ctx.errors.clear()
+        
+        # 2. Get table schema
+        schema_result = await get_table_schema(
+                connection_method=connection_method,
+                cluster_identifier=conn_info['cluster_id'],
+                db_endpoint=conn_info['endpoint'],
+                database=conn_info['database'],
+                table_name='mcp_test_table',
+                ctx=mock_ctx
         )
         
-        # Verify schema information
-        assert isinstance(result, list)
-        assert len(result) > 0
-        
-        # Check for expected columns
-        column_names = [col['column_name'] for col in result]
+        # Verify schema
+        assert isinstance(schema_result, list)
+        assert len(schema_result) > 0
+        column_names = [col['column_name'] for col in schema_result]
         assert 'id' in column_names
         assert 'name' in column_names
         assert 'value' in column_names
         assert 'created_at' in column_names
         assert mock_ctx.errors == []
-    
-    @pytest.mark.asyncio
-    async def test_drop_table(self, mock_ctx, ensure_rds_api_connection):
-        """Test dropping a table."""
-        conn_info = ensure_rds_api_connection
         
-        # Drop table
-        result = await run_query(
-            sql='DROP TABLE IF EXISTS test_integration_table',
+        # 3. DML: Insert data
+        await run_query(
+            sql='INSERT INTO mcp_test_table (name, value) VALUES (\'test1\', 100), (\'test2\', 200), (\'test3\', 300)',
             ctx=mock_ctx,
-            connection_method=ConnectionMethod.RDS_API,
+            connection_method=connection_method,
+            cluster_identifier=conn_info['cluster_id'],
+            db_endpoint=conn_info['endpoint'],
+            database=conn_info['database']
+        )
+        assert mock_ctx.errors == []
+        
+        # 4. DML: Select and verify data
+        select_result = await run_query(
+            sql='SELECT * FROM mcp_test_table ORDER BY id',
+            ctx=mock_ctx,
+            connection_method=connection_method,
             cluster_identifier=conn_info['cluster_id'],
             db_endpoint=conn_info['endpoint'],
             database=conn_info['database']
         )
         
-        # Verify no errors
+        assert isinstance(select_result, list)
+        assert len(select_result) == 3
+        assert select_result[0]['name'] == 'test1'
+        assert select_result[0]['value'] == 100
+        assert select_result[1]['name'] == 'test2'
+        assert select_result[1]['value'] == 200
+        assert select_result[1]['name'] == 'test3'
+        assert select_result[1]['value'] == 300
         assert mock_ctx.errors == []
-
-
-class TestDMLOperations:
-    """Test DML (Data Manipulation Language) operations."""
-    
-    @pytest.fixture(autouse=True)
-    async def setup_test_table(self, mock_ctx, ensure_rds_api_connection):
-        """Set up test table before each test."""
-        conn_info = ensure_rds_api_connection
         
-        # Create test table
+        # 5. DML: Update data
         await run_query(
-            sql='''
-                CREATE TABLE IF NOT EXISTS test_dml_table (
-                    id SERIAL PRIMARY KEY,
-                    name VARCHAR(100),
-                    value INTEGER
-                )
-            ''',
+            sql='UPDATE mcp_test_table SET value = 150 WHERE name = \'test1\'',
             ctx=mock_ctx,
-            connection_method=ConnectionMethod.RDS_API,
+            connection_method=connection_method,
             cluster_identifier=conn_info['cluster_id'],
             db_endpoint=conn_info['endpoint'],
             database=conn_info['database']
         )
-        
-        yield
-        
-        # Cleanup: Drop test table
-        await run_query(
-            sql='DROP TABLE IF EXISTS test_dml_table',
-            ctx=mock_ctx,
-            connection_method=ConnectionMethod.RDS_API,
-            cluster_identifier=conn_info['cluster_id'],
-            db_endpoint=conn_info['endpoint'],
-            database=conn_info['database']
-        )
-    
-    @pytest.mark.asyncio
-    async def test_insert_data(self, integration_config, aws_region, mock_ctx):
-        """Test inserting data."""
-        cluster_config = integration_config['clusters']['regular']
-        cluster_id = cluster_config['cluster_identifier']
-        
-        # Insert data
-        result = await run_query(
-            sql="INSERT INTO test_dml_table (name, value) VALUES ('test1', 100), ('test2', 200)",
-            ctx=mock_ctx,
-            connection_method=ConnectionMethod.RDS_API,
-            cluster_identifier=cluster_id,
-            db_endpoint='',
-            database=cluster_config['database']
-        )
-        
         assert mock_ctx.errors == []
-    
-    @pytest.mark.asyncio
-    async def test_select_data(self, integration_config, aws_region, mock_ctx):
-        """Test selecting data."""
-        cluster_config = integration_config['clusters']['regular']
-        cluster_id = cluster_config['cluster_identifier']
-        
-        # Insert test data first
-        await run_query(
-            sql="INSERT INTO test_dml_table (name, value) VALUES ('test1', 100)",
-            ctx=mock_ctx,
-            connection_method=ConnectionMethod.RDS_API,
-            cluster_identifier=cluster_id,
-            db_endpoint='',
-            database=cluster_config['database']
-        )
-        
-        # Select data
-        result = await run_query(
-            sql='SELECT * FROM test_dml_table ORDER BY id',
-            ctx=mock_ctx,
-            connection_method=ConnectionMethod.RDS_API,
-            cluster_identifier=cluster_id,
-            db_endpoint='',
-            database=cluster_config['database']
-        )
-        
-        # Verify result
-        assert isinstance(result, list)
-        assert len(result) > 0
-        assert result[0]['name'] == 'test1'
-        assert result[0]['value'] == 100
-        assert mock_ctx.errors == []
-    
-    @pytest.mark.asyncio
-    async def test_update_data(self, integration_config, aws_region, mock_ctx):
-        """Test updating data."""
-        cluster_config = integration_config['clusters']['regular']
-        cluster_id = cluster_config['cluster_identifier']
-        
-        # Insert test data
-        await run_query(
-            sql="INSERT INTO test_dml_table (name, value) VALUES ('test1', 100)",
-            ctx=mock_ctx,
-            connection_method=ConnectionMethod.RDS_API,
-            cluster_identifier=cluster_id,
-            db_endpoint='',
-            database=cluster_config['database']
-        )
-        
-        # Update data
-        result = await run_query(
-            sql="UPDATE test_dml_table SET value = 200 WHERE name = 'test1'",
-            ctx=mock_ctx,
-            connection_method=ConnectionMethod.RDS_API,
-            cluster_identifier=cluster_id,
-            db_endpoint='',
-            database=cluster_config['database']
-        )
         
         # Verify update
-        select_result = await run_query(
-            sql="SELECT value FROM test_dml_table WHERE name = 'test1'",
+        update_result = await run_query(
+            sql='SELECT value FROM mcp_test_table WHERE name = \'test1\'',
             ctx=mock_ctx,
-            connection_method=ConnectionMethod.RDS_API,
-            cluster_identifier=cluster_id,
-            db_endpoint='',
-            database=cluster_config['database']
+            connection_method=connection_method,
+            cluster_identifier=conn_info['cluster_id'],
+            db_endpoint=conn_info['endpoint'],
+            database=conn_info['database']
         )
-        
-        assert select_result[0]['value'] == 200
+        assert update_result[0]['value'] == 150
         assert mock_ctx.errors == []
-    
-    @pytest.mark.asyncio
-    async def test_delete_data(self, integration_config, aws_region, mock_ctx):
-        """Test deleting data."""
-        cluster_config = integration_config['clusters']['regular']
-        cluster_id = cluster_config['cluster_identifier']
         
-        # Insert test data
+        # 6. DML: Delete specific data
         await run_query(
-            sql="INSERT INTO test_dml_table (name, value) VALUES ('test1', 100)",
+            sql='DELETE FROM mcp_test_table WHERE name = \'test3\'',
             ctx=mock_ctx,
-            connection_method=ConnectionMethod.RDS_API,
-            cluster_identifier=cluster_id,
-            db_endpoint='',
-            database=cluster_config['database']
+            connection_method=connection_method,
+            cluster_identifier=conn_info['cluster_id'],
+            db_endpoint=conn_info['endpoint'],
+            database=conn_info['database']
         )
-        
-        # Delete data
-        result = await run_query(
-            sql="DELETE FROM test_dml_table WHERE name = 'test1'",
-            ctx=mock_ctx,
-            connection_method=ConnectionMethod.RDS_API,
-            cluster_identifier=cluster_id,
-            db_endpoint='',
-            database=cluster_config['database']
-        )
+        assert mock_ctx.errors == []
         
         # Verify deletion
-        select_result = await run_query(
-            sql='SELECT COUNT(*) as count FROM test_dml_table',
+        count_result = await run_query(
+            sql='SELECT COUNT(*) as count FROM mcp_test_table',
             ctx=mock_ctx,
-            connection_method=ConnectionMethod.RDS_API,
-            cluster_identifier=cluster_id,
-            db_endpoint='',
-            database=cluster_config['database']
+            connection_method=connection_method,
+            cluster_identifier=conn_info['cluster_id'],
+            db_endpoint=conn_info['endpoint'],
+            database=conn_info['database']
         )
-        
-        assert select_result[0]['count'] == 0
+        assert count_result[0]['count'] == 2  # Should have 2 rows left
         assert mock_ctx.errors == []
+        
+        # 7. DDL: Clean up - Clear table data (DROP TABLE blocked by SQL injection protection)
+        await run_query(
+            sql='DELETE FROM mcp_test_table',
+            ctx=mock_ctx,
+            connection_method=connection_method,
+            cluster_identifier=conn_info['cluster_id'],
+            db_endpoint=conn_info['endpoint'],
+            database=conn_info['database']
+        )
 
 
 class TestReadonlyMode:
@@ -876,50 +740,66 @@ class TestReadonlyMode:
     
     @pytest.mark.asyncio
     async def test_readonly_blocks_write_operations(
-        self, integration_config, aws_region, mock_ctx, monkeypatch
+        self, mock_ctx, ensure_rds_api_connection, monkeypatch
     ):
         """Test that readonly mode blocks write operations."""
-        # Set readonly mode
-        monkeypatch.setattr(server_module, 'readonly_query', True)
+        conn_info = ensure_rds_api_connection
         
-        cluster_config = integration_config['clusters']['regular']
-        cluster_id = cluster_config['cluster_identifier']
+        # Get the connection object and patch its readonly_query property
+        db_connection = db_connection_map.get(
+            method=ConnectionMethod.RDS_API,
+            cluster_identifier=conn_info['cluster_id'],
+            db_endpoint=conn_info['endpoint'],
+            database=conn_info['database']
+        )
+        
+        # Patch the connection's _readonly attribute (readonly_query property returns this)
+        monkeypatch.setattr(db_connection, '_readonly', True)
         
         # Attempt INSERT (should be blocked)
         result = await run_query(
-            sql="INSERT INTO test_table (name) VALUES ('test')",
+            sql="INSERT INTO mcp_test_table (name) VALUES ('test')",
             ctx=mock_ctx,
             connection_method=ConnectionMethod.RDS_API,
-            cluster_identifier=cluster_id,
-            db_endpoint='',
-            database=cluster_config['database']
+            cluster_identifier=conn_info['cluster_id'],
+            db_endpoint=conn_info['endpoint'],
+            database=conn_info['database']
         )
         
-        # Verify write was blocked
+        # Verify write was blocked with readonly error
         assert isinstance(result, list)
         assert len(result) > 0
         assert 'error' in result[0]
+        assert result[0]['error'] == 'Your MCP tool only allows readonly query. If you want to write, change the MCP configuration per README.md'
         assert len(mock_ctx.errors) > 0
+        assert mock_ctx.errors[0] == 'Your MCP tool only allows readonly query. If you want to write, change the MCP configuration per README.md'
     
     @pytest.mark.asyncio
     async def test_readonly_allows_select(
-        self, integration_config, aws_region, mock_ctx, monkeypatch
+        self, mock_ctx, ensure_rds_api_connection, monkeypatch
     ):
         """Test that readonly mode allows SELECT queries."""
-        # Set readonly mode
-        monkeypatch.setattr(server_module, 'readonly_query', True)
+        conn_info = ensure_rds_api_connection
         
-        cluster_config = integration_config['clusters']['regular']
-        cluster_id = cluster_config['cluster_identifier']
+        # Get the connection object and patch its _readonly attribute
+        db_connection = db_connection_map.get(
+            method=ConnectionMethod.RDS_API,
+            cluster_identifier=conn_info['cluster_id'],
+            db_endpoint=conn_info['endpoint'],
+            database=conn_info['database']
+        )
+        
+        # Patch the connection's _readonly attribute (readonly_query property returns this)
+        monkeypatch.setattr(db_connection, '_readonly', True)
         
         # Run SELECT query (should succeed)
         result = await run_query(
             sql='SELECT 1 as test',
             ctx=mock_ctx,
             connection_method=ConnectionMethod.RDS_API,
-            cluster_identifier=cluster_id,
-            db_endpoint='',
-            database=cluster_config['database']
+            cluster_identifier=conn_info['cluster_id'],
+            db_endpoint=conn_info['endpoint'],
+            database=conn_info['database']
         )
         
         # Verify query succeeded
@@ -934,11 +814,10 @@ class TestSQLInjectionProtection:
     
     @pytest.mark.asyncio
     async def test_sql_injection_detection(
-        self, integration_config, aws_region, mock_ctx
+        self, mock_ctx, ensure_rds_api_connection
     ):
         """Test that SQL injection patterns are detected and blocked."""
-        cluster_config = integration_config['clusters']['regular']
-        cluster_id = cluster_config['cluster_identifier']
+        conn_info = ensure_rds_api_connection
         
         # Attempt query with injection pattern
         malicious_queries = [
@@ -952,15 +831,16 @@ class TestSQLInjectionProtection:
                 sql=sql,
                 ctx=mock_ctx,
                 connection_method=ConnectionMethod.RDS_API,
-                cluster_identifier=cluster_id,
-                db_endpoint='',
-                database=cluster_config['database']
+                cluster_identifier=conn_info['cluster_id'],
+                db_endpoint=conn_info['endpoint'],
+                database=conn_info['database']
             )
             
-            # Verify injection was blocked
+            # Verify injection was blocked with specific injection error
             assert isinstance(result, list)
             assert len(result) > 0
             assert 'error' in result[0]
+            assert result[0]['error'] == 'Your query contains risky injection patterns'
 
 
 class TestJobStatus:

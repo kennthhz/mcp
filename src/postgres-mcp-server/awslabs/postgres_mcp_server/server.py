@@ -239,7 +239,7 @@ async def get_table_schema(
         )
     )
 
-    sql = """
+    sql = f"""
         SELECT
             a.attname AS column_name,
             pg_catalog.format_type(a.atttypid, a.atttypmod) AS data_type,
@@ -247,7 +247,7 @@ async def get_table_schema(
         FROM
             pg_attribute a
         WHERE
-            a.attrelid = to_regclass(%(table_name)s)
+            a.attrelid = to_regclass('{table_name}')
             AND a.attnum > 0
             AND NOT a.attisdropped
         ORDER BY a.attnum

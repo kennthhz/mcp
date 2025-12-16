@@ -8,9 +8,7 @@ The integration test suite (`test_integration.py`) provides comprehensive testin
 
 - **Cluster Creation**: Regular and Express Aurora PostgreSQL clusters
 - **Database Connections**: RDS API, PG Wire Protocol, and PG Wire with IAM
-- **Query Execution**: SELECT, INSERT, UPDATE, DELETE operations
-- **DDL Operations**: CREATE TABLE, DROP TABLE, schema retrieval
-- **DML Operations**: Data manipulation across different connection methods
+- **Query Execution**: Comprehensive DDL/DML operations (CREATE, INSERT, SELECT, UPDATE, DELETE, DROP)
 - **Readonly Mode**: Enforcement of readonly query restrictions
 - **SQL Injection Protection**: Detection and blocking of malicious patterns
 - **Job Status Tracking**: Background job monitoring
@@ -32,15 +30,19 @@ The integration test suite (`test_integration.py`) provides comprehensive testin
    clusters:
      regular:
        cluster_identifier: "your-test-cluster-name"
-       endpoint: "your-cluster.cluster-abc123.us-east-2.rds.amazonaws.com"  # REQUIRED
+       # endpoint: "your-cluster.cluster-abc123.us-east-2.rds.amazonaws.com"  # OPTIONAL: Auto-discovered if not provided
        port: 5432
      express:
        cluster_identifier: "your-express-cluster-name"
-       endpoint: "your-express.cluster-xyz789.us-east-2.rds-preview.amazonaws.com"  # REQUIRED
+       # endpoint: "your-express.cluster-xyz789.us-east-2.rds-preview.amazonaws.com"  # OPTIONAL: Auto-discovered if not provided
        port: 5432
    ```
 
-3. Get your cluster endpoints:
+3. **Endpoint Auto-Discovery**: The test suite now automatically discovers cluster endpoints from AWS using the cluster identifier and region. You can:
+   - **Option A**: Let the tests auto-discover endpoints (recommended)
+   - **Option B**: Manually specify endpoints in the config file
+   
+   To manually get endpoints (if needed):
    ```bash
    # For regular clusters
    aws rds describe-db-clusters \
@@ -67,11 +69,11 @@ The integration test suite (`test_integration.py`) provides comprehensive testin
 #### Cluster Configuration
 - **Regular Cluster**: Aurora Serverless v2 with RDS Data API
   - `cluster_identifier`: Unique cluster name
-  - `connection_methods`: `rdsapi`, `pgwire` (requires specific setup)
+  - Tests all connection methods: `rdsapi`, `pgwire`, `pgwire_iam`
   
 - **Express Cluster**: Fast-provisioning cluster with IAM auth
   - `cluster_identifier`: Unique cluster name
-  - `connection_methods`: `pgwire_iam`
+  - Tests connection method: `pgwire_iam`
 
 #### MCP Configuration Variants
 - `readonly`: Tests with `allow_write_query: false`
@@ -80,6 +82,17 @@ The integration test suite (`test_integration.py`) provides comprehensive testin
 #### Cleanup Options
 - `delete_clusters_after_tests`: Auto-delete test clusters (default: `false`)
 - `drop_test_tables`: Drop test tables after completion (default: `true`)
+
+#### Endpoint Auto-Discovery
+The integration test suite automatically discovers cluster endpoints using AWS APIs:
+
+- **How it works**: Uses `internal_get_cluster_properties()` to fetch cluster details from AWS RDS
+- **Fallback**: If auto-discovery fails, uses endpoint from config (if provided)
+- **Benefits**: 
+  - No need to manually update endpoints in config files
+  - Works with dynamically created clusters
+  - Reduces configuration maintenance
+- **Requirements**: AWS credentials with `rds:DescribeDBClusters` permission
 
 ## Running Tests
 
@@ -96,14 +109,8 @@ pytest tests/test_integration.py::TestClusterCreation -v
 # Test database connections only
 pytest tests/test_integration.py::TestDatabaseConnection -v
 
-# Test query execution only
+# Test query execution only (includes DDL/DML operations)
 pytest tests/test_integration.py::TestQueryExecution -v
-
-# Test DDL operations only
-pytest tests/test_integration.py::TestDDLOperations -v
-
-# Test DML operations only
-pytest tests/test_integration.py::TestDMLOperations -v
 
 # Test readonly mode only
 pytest tests/test_integration.py::TestReadonlyMode -v
@@ -120,8 +127,8 @@ pytest tests/test_integration.py::TestClusterCreation::test_create_regular_clust
 # Test RDS API connection
 pytest tests/test_integration.py::TestDatabaseConnection::test_connect_via_rds_api -v
 
-# Test SELECT query
-pytest tests/test_integration.py::TestQueryExecution::test_run_select_query_rds_api -v
+# Test comprehensive DDL/DML operations
+pytest tests/test_integration.py::TestQueryExecution::test_comprehensive_ddl_dml_operations -v
 ```
 
 ### Skip Integration Tests
@@ -145,8 +152,8 @@ pytest tests/test_integration.py -v -m integration --cov=awslabs.postgres_mcp_se
 | `connect_to_database` | ✅ All connection methods | `TestDatabaseConnection` |
 | `is_database_connected` | ✅ Connection verification | `TestDatabaseConnection` |
 | `get_database_connection_info` | ✅ Connection listing | `TestDatabaseConnection` |
-| `run_query` | ✅ All query types | `TestQueryExecution`, `TestDDLOperations`, `TestDMLOperations` |
-| `get_table_schema` | ✅ Schema retrieval | `TestDDLOperations` |
+| `run_query` | ✅ All query types | `TestQueryExecution` |
+| `get_table_schema` | ✅ Schema retrieval | `TestQueryExecution` |
 | `get_job_status` | ✅ Job tracking | `TestJobStatus` |
 
 ### Connection Methods Tested
@@ -233,20 +240,17 @@ pip install -e ".[dev]"
 - Tests parameterized queries
 - Verifies query results and error handling
 
-### 4. DDL Operation Tests
-- Creates test tables
+### 4. Comprehensive DDL/DML Tests
+- Creates test tables (DDL)
 - Retrieves table schemas
-- Drops test tables
-- Verifies schema information accuracy
-
-### 5. DML Operation Tests
-- Inserts test data
+- Inserts test data (DML)
 - Selects and verifies data
 - Updates existing data
 - Deletes data
-- Verifies data integrity
+- Drops test tables (DDL)
+- Verifies data integrity throughout
 
-### 6. Security Tests
+### 5. Security Tests
 - Tests readonly mode enforcement
 - Tests SQL injection detection
 - Verifies malicious patterns are blocked

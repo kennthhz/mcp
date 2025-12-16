@@ -7,29 +7,23 @@ aws:
 
 # Test Clusters Configuration
 clusters:
-  # Regular Aurora Serverless v2 cluster (uses RDS Data API)
+  # Regular Aurora PostgreSQL cluster
   regular:
     cluster_identifier: "mcp-test-regular-cluster"
-    endpoint: "mcp-test-regular-cluster.cluster-c4gbhisi7urs.us-east-2.rds.amazonaws.com"  # REQUIRED: Your cluster endpoint
+    # endpoint: "mcp-test-regular-cluster.cluster-c4gbhisi7urs.us-east-2.rds.amazonaws.com"  # OPTIONAL: Will be auto-discovered if not provided
     port: 5432
     database: "postgres"
     engine_version: "17.5"
     with_express_configuration: false
-    connection_methods:
-      - rdsapi
-      - pgwire  # Only works if RDS API disabled and publicly accessible
-      - pgwire_iam  # Works with IAM authentication enabled
     
-  # Express configuration cluster (uses IAM authentication)
+  # Express configuration  Aurora PostgreSQL cluster (supports only IAM authentication)
   express:
     cluster_identifier: "mcp-test-express-cluster"
-    endpoint: "mcp-test-express-cluster.cluster-cni82m4m0h5z.us-east-2.rds-preview.amazonaws.com"  # REQUIRED: Your cluster endpoint
+    # endpoint: "mcp-test-express-cluster.cluster-cni82m4m0h5z.us-east-2.rds-preview.amazonaws.com"  # OPTIONAL: Will be auto-discovered if not provided
     port: 5432
     database: "postgres"
     engine_version: "17.4"
     with_express_configuration: true
-    connection_methods:
-      - pgwire_iam
 
 # MCP Server Configuration Variants
 mcp_configurations:
